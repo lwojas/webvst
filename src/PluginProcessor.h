@@ -1,7 +1,9 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
+#include "EngineHost.h"
 
-// Shell only: stereo out, MIDI in, silence. The webdsp engine, command queue and bridge come next.
+// Stereo instrument backed by the native webdsp engine (EngineHost). The page drives it through the bridge;
+// DAW MIDI and transport are not routed yet.
 class WebVstProcessor : public juce::AudioProcessor {
  public:
   WebVstProcessor();
@@ -27,9 +29,12 @@ class WebVstProcessor : public juce::AudioProcessor {
   const juce::String getProgramName(int) override { return {}; }
   void changeProgramName(int, const juce::String&) override {}
 
+  EngineHost& engineHost() { return engineHost_; }
+
   void getStateInformation(juce::MemoryBlock&) override {}
   void setStateInformation(const void*, int) override {}
 
  private:
+  EngineHost engineHost_;
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WebVstProcessor)
 };

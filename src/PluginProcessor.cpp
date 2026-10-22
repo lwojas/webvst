@@ -4,7 +4,7 @@
 WebVstProcessor::WebVstProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)) {}
 
-void WebVstProcessor::prepareToPlay(double, int) {}
+void WebVstProcessor::prepareToPlay(double sampleRate, int) { engineHost_.prepare(sampleRate); }
 
 bool WebVstProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
   return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
@@ -12,7 +12,7 @@ bool WebVstProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
 
 void WebVstProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) {
   juce::ScopedNoDenormals noDenormals;
-  buffer.clear();
+  engineHost_.process(buffer);
 }
 
 juce::AudioProcessorEditor* WebVstProcessor::createEditor() { return new WebVstEditor(*this); }
