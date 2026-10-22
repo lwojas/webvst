@@ -14,6 +14,8 @@
   var backend = window.__JUCE__ && window.__JUCE__.backend;
   if (!backend) return;
   window.__webvstShim = true;
+  // Tells webdsp (hasEmbeddedHost) that the audio backend is embedded: no user gesture is needed.
+  window.__webdspHost = { kind: 'native' };
 
   var CHANNEL = 'webvst';
   var CHUNK_BYTES = 96 * 1024; // raw PCM bytes per message; a multiple of 4
