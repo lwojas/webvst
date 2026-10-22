@@ -139,6 +139,115 @@
   window.webkitAudioContext = FakeContext;
   window.AudioWorkletNode = FakeNode;
 
+
+  // ---- Web MIDI: the DAW's MIDI as a virtual input ------------------------------------------------
+  // The page asks navigator.requestMIDIAccess() as it would in a browser. We hand back a MIDIAccess that has
+  // one extra input, "WebVST DAW MIDI", fed by the host's MIDI. Real hardware ports, where the WebView has
+  // them (WebView2), are kept; where it has none (WKWebView has no Web MIDI), the virtual input is all there
+  // is. The port name matches no controller profile, so midi-core connects it generically and the
+  // trackers' "any input" note paths take it as a keyboard. No outputs are offered (MIDI out is not routed).
+  var VIRTUAL_NAME = 'WebVST DAW MIDI';
+  var virtualInputs = []; // one per MIDIAccess handed out, like a browser's per-access port objects
+
+  function makeEventTarget(owner) {
+    var listeners = {};
+    owner.addEventListener = function (type, fn) {
+      (listeners[type] = listeners[type] || []).push(fn);
+    };
+    owner.removeEventListener = function (type, fn) {
+      var list = listeners[type];
+      if (list) listeners[type] = list.filter(function (f) {
+        return f !== fn;
+      });
+    };
+    owner.dispatchEvent = function (event) {
+      var list = (listeners[event.type] || []).slice();
+      var handler = owner['on' + event.type];
+      if (typeof handler === 'function') handler.call(owner, event);
+      for (var i = 0; i < list.length; i++) list[i].call(owner, event);
+      return true;
+    };
+  }
+
+  function makeVirtualInput() {
+    var input = {
+      id: 'webvst-daw-midi-in',
+      name: VIRTUAL_NAME,
+      manufacturer: 'WebVST',
+      version: '1',
+      type: 'input',
+      state: 'connected',
+      connection: 'closed',
+      onmidimessage: null,
+      onstatechange: null,
+      open: function () {
+        input.connection = 'open';
+        return Promise.resolve(input);
+      },
+      close: function () {
+        input.connection = 'closed';
+        return Promise.resolve(input);
+      },
+    };
+    makeEventTarget(input);
+    virtualInputs.push(input);
+    return input;
+  }
+
+  function deliverMidi(messages) {
+    for (var m = 0; m < messages.length; m++) {
+      var msg = messages[m];
+      // The event carries the engine time of the message; the page's timestamps are on performance.now().
+      var stamp = offset === null ? performance.now() : (msg.time - offset) * 1000;
+      for (var i = 0; i < virtualInputs.length; i++) {
+        var input = virtualInputs[i];
+        input.connection = 'open'; // like a real port, listening opens it
+        input.dispatchEvent({ type: 'midimessage', data: Uint8Array.from(msg.data), timeStamp: stamp, target: input, currentTarget: input });
+      }
+    }
+  }
+
+  function makeAccess(real) {
+    var access = { sysexEnabled: real ? real.sysexEnabled : false, onstatechange: null };
+    makeEventTarget(access);
+    var virtualInput = makeVirtualInput();
+    function rebuild() {
+      var inputs = new Map();
+      if (real) real.inputs.forEach(function (port, id) {
+        inputs.set(id, port);
+      });
+      inputs.set(virtualInput.id, virtualInput);
+      access.inputs = inputs;
+      var outputs = new Map();
+      if (real) real.outputs.forEach(function (port, id) {
+        outputs.set(id, port);
+      });
+      access.outputs = outputs;
+    }
+    rebuild();
+    if (real) {
+      real.addEventListener('statechange', function (event) {
+        rebuild();
+        access.dispatchEvent({ type: 'statechange', port: event.port, target: access, currentTarget: access });
+      });
+    }
+    return access;
+  }
+
+  var realRequest = typeof navigator.requestMIDIAccess === 'function' ? navigator.requestMIDIAccess.bind(navigator) : null;
+  Object.defineProperty(navigator, 'requestMIDIAccess', {
+    configurable: true,
+    writable: true,
+    value: function (options) {
+      var start = realRequest
+        ? Promise.resolve(realRequest(options)).catch(function () {
+            return null; // permission refused or unavailable: the virtual input still works
+          })
+        : Promise.resolve(null);
+      return start.then(makeAccess);
+    },
+  });
+
   // ---- page -> native ---------------------------------------------------------------------------
   function sendCommand(command) {
     if (command.type === 'load-sample') return sendSample(command.sample);
@@ -171,6 +280,10 @@
   // ---- native -> page ---------------------------------------------------------------------------
   backend.addEventListener(CHANNEL, function (event) {
     if (!event) return;
+    if (event.type === 'midi') {
+      deliverMidi(event.messages);
+      return;
+    }
     if (event.type === '__clock') {
       onClock(event.frame, event.sampleRate);
       return;

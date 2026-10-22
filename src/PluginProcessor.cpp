@@ -13,7 +13,7 @@ bool WebVstProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const {
   return layouts.getMainOutputChannelSet() == juce::AudioChannelSet::stereo();
 }
 
-void WebVstProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer&) {
+void WebVstProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages) {
   juce::ScopedNoDenormals noDenormals;
   EngineHost::HostTimeInfo host;
   if (auto* playHead = getPlayHead()) {
@@ -35,7 +35,7 @@ void WebVstProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
       }
     }
   }
-  engineHost_.process(buffer, host);
+  engineHost_.process(buffer, host, midiMessages);
 }
 
 juce::AudioProcessorEditor* WebVstProcessor::createEditor() { return new WebVstEditor(*this); }

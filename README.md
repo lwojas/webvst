@@ -5,7 +5,7 @@ Independent of the web build pipelines: it consumes webdsp's header-only engine 
 loads the client from a URL. See the feasibility report for the architecture.
 
 Status: audio wired. The page's unmodified `AudioRuntime` drives a native webdsp engine through a bridge.
-DAW MIDI, host transport and DAW state are not routed yet.
+Host transport and DAW MIDI reach the page; DAW state (saving the project in the session) is not done yet.
 
 ## How it fits together
 
@@ -26,6 +26,16 @@ DAW MIDI, host transport and DAW state are not routed yet.
     cmake --build build --target WebVST_VST3
 
 The bundle lands under `build/WebVST_artefacts/`. Copy it to `~/Library/Audio/Plug-Ins/VST3/` to load it in a host.
+
+## MIDI and transport
+
+- Host MIDI (channel messages) is posted to the page and appears as a Web MIDI input, "WebVST DAW MIDI". The shim wraps
+  `navigator.requestMIDIAccess`: real ports are kept where the WebView has them (WebView2), WKWebView has none, so
+  the virtual input is all there is on macOS. The name matches no controller profile, so Push/Launchpad logic
+  ignores it. No outputs are offered. SysEx is not forwarded. Hardware controllers are not reachable from a
+  macOS plugin WebView yet (that would be a native MIDI bridge).
+- Host transport: see webdsp `docs/host-transport.md`. The plugin declares 100 ms latency (plugin delay
+  compensation) so the page can start on the first beat.
 
 ## Tests
 

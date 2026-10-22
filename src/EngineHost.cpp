@@ -88,7 +88,11 @@ void warmUp(webdsp::Engine& e) {
 
 }  // namespace
 
-EngineHost::EngineHost() { startTimerHz(60); }
+// The timer drains audio-thread events to the page. 120 Hz keeps MIDI under ~10 ms of added delay; the
+// clock refresh and stall detection below are counted in ticks of this rate.
+constexpr int kTimerHz = 120;
+
+EngineHost::EngineHost() { startTimerHz(kTimerHz); }
 
 EngineHost::~EngineHost() {
   stopTimer();
@@ -539,6 +543,23 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
   }
 }
 
+// Forwards the block's incoming MIDI to the page, which exposes it as a Web MIDI input. Channel voice and
+// system realtime messages only (up to 3 bytes); SysEx is not forwarded. Each message carries its engine
+// frame, so the page can time-stamp it exactly.
+void EngineHost::forwardMidi(const juce::MidiBuffer& midi, int64_t blockStart) {
+  for (const auto metadata : midi) {
+    const int size = metadata.numBytes;
+    const uint8_t* data = metadata.data;
+    if (size < 1 || size > 3 || data[0] < 0x80 || data[0] == 0xF0) continue;
+    Evt ev;
+    ev.type = EvtType::Midi;
+    ev.a = data[0] | (size > 1 ? data[1] << 8 : 0) | (size > 2 ? data[2] << 16 : 0);
+    ev.b = size;
+    ev.dbl = static_cast<double>(blockStart + metadata.samplePosition);
+    postEvt(ev);
+  }
+}
+
 // Watches the host playhead and posts a HostTransport event when something a follower must know changed:
 // start/stop and locates/loop wraps (new epoch), tempo changes (same epoch, at most every ~43 ms), loop or
 // signature edits, a page (re)connecting, and a ~170 ms refresh while playing. No allocation, no waiting.
@@ -618,13 +639,14 @@ void EngineHost::readCapture(int32_t captureId, int32_t resultSampleId) {
   engine_->discardCapture(captureId);
 }
 
-void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host) {
+void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host, const juce::MidiBuffer& midi) {
   const int numFrames = buffer.getNumSamples();
   const int64_t blockStart = frame_.load(std::memory_order_relaxed);
 
   Cmd cmd;
   while (cmds_.pop(cmd)) applyCmd(cmd, blockStart);
   trackTransport(host, blockStart, numFrames);
+  forwardMidi(midi, blockStart);
 
   buffer.clear();
   if (engine_) {
@@ -692,8 +714,15 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
 void EngineHost::timerCallback() {
   static int tick = 0;
   Evt ev;
+  juce::Array<juce::var> midiMessages;
   while (evts_.pop(ev)) {
     switch (ev.type) {
+      case EvtType::Midi: {
+        juce::Array<juce::var> bytes;
+        for (int i = 0; i < ev.b; i++) bytes.add((ev.a >> (8 * i)) & 0xFF);
+        midiMessages.add(object({{"data", bytes}, {"time", ev.dbl / sampleRate_}}));
+        break;
+      }
       case EvtType::DisposeEngine: delete static_cast<webdsp::Engine*>(ev.p); break;
       case EvtType::DisposeSample: delete static_cast<SamplePayload*>(ev.p); break;
       case EvtType::HostTransport: {
@@ -752,6 +781,8 @@ void EngineHost::timerCallback() {
     }
   }
 
+  if (!midiMessages.isEmpty()) send(object({{"type", "midi"}, {"messages", midiMessages}}));
+
   const int dropped = droppedCmds_.load(std::memory_order_relaxed);
   if (dropped != reportedDropped_.load(std::memory_order_relaxed)) {
     reportedDropped_.store(dropped, std::memory_order_relaxed);
@@ -764,11 +795,11 @@ void EngineHost::timerCallback() {
   const int64_t frameNow = framesRendered();
   stalledTicks_ = frameNow == lastSeenFrame_ ? stalledTicks_ + 1 : 0;
   lastSeenFrame_ = frameNow;
-  if (stalledTicks_ >= 15 && lastSentTransport_.valid && lastSentTransport_.playing) {
+  if (stalledTicks_ >= kTimerHz / 4 && lastSentTransport_.valid && lastSentTransport_.playing) {
     if (auto* o = lastSentTransport_.event.getDynamicObject()) o->setProperty("playing", false);
     lastSentTransport_.playing = false;
     send(lastSentTransport_.event);
   }
 
-  if ((++tick & 1) == 0) send(object({{"type", "__clock"}, {"frame", static_cast<double>(framesRendered())}, {"sampleRate", sampleRate_}}));
+  if ((++tick % (kTimerHz / 30)) == 0) send(object({{"type", "__clock"}, {"frame", static_cast<double>(framesRendered())}, {"sampleRate", sampleRate_}}));
 }

@@ -59,7 +59,7 @@ class EngineHost : private juce::Timer {
   int latencySamples() const { return static_cast<int>(kHostLatencySeconds * sampleRate_); }
 
   // Audio thread.
-  void process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host);
+  void process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host, const juce::MidiBuffer& midi);
 
   // Frames rendered so far; the page's clock (currentTime = frames / sampleRate).
   int64_t framesRendered() const { return frame_.load(std::memory_order_acquire); }
@@ -81,7 +81,7 @@ class EngineHost : private juce::Timer {
     void* p = nullptr;
   };
 
-  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport };
+  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport, Midi };
   enum ErrorCode : int32_t { kErrAddEffect = 1, kErrCreateInstrument, kErrEffectLfo, kErrInstrumentLfo, kErrArmCapture, kErrQueueFull };
 
   struct Evt {
@@ -128,6 +128,7 @@ class EngineHost : private juce::Timer {
   void beginInit(const juce::var& message);
   juce::var buildReady(int maxVoices);
   void applyCmd(const Cmd& c, int64_t blockStart);
+  void forwardMidi(const juce::MidiBuffer& midi, int64_t blockStart);
   void trackTransport(const HostTimeInfo& host, int64_t blockStart, int numFrames);
   void readCapture(int32_t captureId, int32_t resultSampleId);
   void postEvt(const Evt& e);

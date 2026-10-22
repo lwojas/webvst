@@ -46,6 +46,7 @@ struct Rig {
   std::vector<juce::var> events;
   juce::AudioBuffer<float> buf{2, kBlock};
   EngineHost::HostTimeInfo hostInfo;
+  juce::MidiBuffer midiIn;
   Rig() {
     host.setEventSink([this](const juce::var& e) { events.push_back(e); });
     host.prepare(kSr);
@@ -53,7 +54,7 @@ struct Rig {
   // One host block; returns peak. `countAllocs` brackets the audio-thread call only.
   float block(bool countAllocs = false) {
     if (countAllocs) g_counting = true;
-    host.process(buf, hostInfo);
+    host.process(buf, hostInfo, midiIn);
     g_counting = false;
     return buf.getMagnitude(0, kBlock);
   }
@@ -256,9 +257,44 @@ int main() {
     r.block();
     r.pump();
     r.events.clear();
-    for (int i = 0; i < 16; i++) r.pump();  // 16 ticks with no audio blocks
+    for (int i = 0; i < 40; i++) r.pump();  // well over 250 ms of ticks with no audio blocks
     t = transports();
     CHECK(t.size() == 1 && !static_cast<bool>(t[0]["playing"]), "a silent host is reported stopped after ~250 ms (%d events)", static_cast<int>(t.size()));
+  }
+
+  {  // MIDI input
+    Rig r;
+    r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16,"outputChannels":2})"));
+    r.block();
+    r.events.clear();
+    r.midiIn.addEvent(juce::MidiMessage::noteOn(1, 60, (juce::uint8) 100), 10);
+    r.midiIn.addEvent(juce::MidiMessage::controllerEvent(1, 7, 64), 20);
+    r.midiIn.addEvent(juce::MidiMessage::pitchWheel(2, 0x2000), 30);
+    r.midiIn.addEvent(juce::MidiMessage::noteOff(1, 60), 400);
+    const uint8_t sysex[] = {0xF0, 0x7E, 0x00, 0xF7};
+    r.midiIn.addEvent(juce::MidiMessage(sysex, 4), 40);
+    const double blockStart = static_cast<double>(r.host.framesRendered());
+    g_allocs = 0;
+    r.block(true);
+    CHECK(g_allocs.load() == 0, "forwarding MIDI allocates nothing on the audio thread (%ld)", g_allocs.load());
+    r.midiIn.clear();
+    r.pump();
+    const juce::var* m = r.first("midi");
+    CHECK(m != nullptr, "MIDI is delivered as one 'midi' event");
+    if (m) {
+      auto* arr = (*m)["messages"].getArray();
+      CHECK(arr && arr->size() == 4, "four channel messages forwarded, SysEx skipped (%d)", arr ? arr->size() : -1);
+      if (arr && arr->size() == 4) {
+        auto byte = [&](int i, int j) { return static_cast<int>((*(*arr)[i]["data"].getArray())[j]); };
+        CHECK(byte(0, 0) == 0x90 && byte(0, 1) == 60 && byte(0, 2) == 100, "note on 0x90 60 100");
+        CHECK(byte(1, 0) == 0xB0 && byte(1, 1) == 7 && byte(1, 2) == 64, "controller 0xB0 7 64");
+        CHECK(byte(2, 0) == 0xE1, "pitch wheel on channel 2");
+        CHECK(byte(3, 0) == 0x80 && byte(3, 1) == 60, "note off");
+        const double t0 = static_cast<double>((*arr)[0]["time"]);
+        CHECK(std::fabs(t0 - (blockStart + 10) / kSr) < 1e-9, "time is the sample-accurate engine time of the event");
+        CHECK(static_cast<double>((*arr)[3]["time"]) > t0, "order and timing preserved");
+      }
+    }
   }
 
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);
