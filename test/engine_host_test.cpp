@@ -45,6 +45,7 @@ struct Rig {
   EngineHost host;
   std::vector<juce::var> events;
   juce::AudioBuffer<float> buf{2, kBlock};
+  EngineHost::HostTimeInfo hostInfo;
   Rig() {
     host.setEventSink([this](const juce::var& e) { events.push_back(e); });
     host.prepare(kSr);
@@ -52,7 +53,7 @@ struct Rig {
   // One host block; returns peak. `countAllocs` brackets the audio-thread call only.
   float block(bool countAllocs = false) {
     if (countAllocs) g_counting = true;
-    host.process(buf);
+    host.process(buf, hostInfo);
     g_counting = false;
     return buf.getMagnitude(0, kBlock);
   }
@@ -161,6 +162,103 @@ int main() {
         break;
       }
     CHECK(firstNonZero >= 0 && firstNonZero <= 1, "scheduled voice starts on its frame (first non-zero sample index %d)", firstNonZero);
+  }
+
+  {  // Host transport tracking
+    Rig r;
+    r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16,"outputChannels":2})"));
+    auto transports = [&] {
+      std::vector<juce::var> out;
+      for (auto& e : r.events)
+        if (e["type"].toString() == "host-transport") out.push_back(e);
+      return out;
+    };
+    r.hostInfo.valid = true;
+    r.hostInfo.bpm = 120.0;
+    r.block();
+    r.pump();
+    auto t = transports();
+    CHECK(t.size() == 1 && !static_cast<bool>(t[0]["playing"]), "a connecting page gets the stopped state once");
+
+    // Start at beat 8: 120 bpm = 2 beats/s.
+    r.events.clear();
+    r.hostInfo.playing = true;
+    r.hostInfo.ppq = 8.0;
+    const double startFrame = static_cast<double>(r.host.framesRendered());
+    r.block();
+    r.pump();
+    t = transports();
+    CHECK(t.size() == 1 && static_cast<bool>(t[0]["playing"]), "start produces one playing event");
+    if (t.size() == 1) {
+      CHECK(std::fabs(static_cast<double>(t[0]["beat"]) - 8.0) < 1e-9, "beat is the host ppq at the block start");
+      const double want = startFrame / kSr + EngineHost::kHostLatencySeconds;
+      CHECK(std::fabs(static_cast<double>(t[0]["time"]) - want) < 1e-9, "time is the block frame plus the declared latency (%.4f)", want);
+      CHECK(static_cast<int>(t[0]["epoch"]) >= 1, "start opens a new epoch");
+    }
+    const int epochAtStart = t.empty() ? 0 : static_cast<int>(t[0]["epoch"]);
+
+    // Steady playback: no event for many blocks except the periodic refresh.
+    r.events.clear();
+    for (int i = 0; i < 12; i++) {
+      r.hostInfo.ppq += kBlock / kSr * 2.0;
+      r.block();
+    }
+    r.pump();
+    t = transports();
+    CHECK(t.size() <= 1, "steady playback sends at most the periodic refresh (%d events in 12 blocks)", static_cast<int>(t.size()));
+    if (!t.empty()) CHECK(static_cast<int>(t[0]["epoch"]) == epochAtStart, "a refresh keeps the epoch");
+
+    // Locate.
+    r.events.clear();
+    r.hostInfo.ppq = 32.0;
+    r.block();
+    r.pump();
+    t = transports();
+    CHECK(t.size() == 1 && static_cast<int>(t[0]["epoch"]) > epochAtStart, "a locate opens a new epoch");
+
+    // Tempo change keeps the epoch.
+    const int epochAfterLocate = t.empty() ? 0 : static_cast<int>(t[0]["epoch"]);
+    for (int i = 0; i < 6; i++) {
+      r.hostInfo.ppq += kBlock / kSr * 2.0;
+      r.block();
+    }
+    r.events.clear();
+    r.hostInfo.bpm = 140.0;
+    r.hostInfo.ppq += kBlock / kSr * 2.0;
+    r.block();
+    r.pump();
+    t = transports();
+    CHECK(t.size() == 1 && std::fabs(static_cast<double>(t[0]["bpm"]) - 140.0) < 1e-9 && static_cast<int>(t[0]["epoch"]) == epochAfterLocate,
+          "a tempo change is reported without a new epoch");
+
+    // Loop info.
+    r.events.clear();
+    r.hostInfo.looping = true;
+    r.hostInfo.loopStart = 16.0;
+    r.hostInfo.loopEnd = 32.0;
+    r.hostInfo.ppq += kBlock / kSr * 140.0 / 60.0;
+    r.block();
+    r.pump();
+    t = transports();
+    CHECK(t.size() == 1 && static_cast<bool>(t[0]["loop"].isObject()) && static_cast<double>(t[0]["loop"]["end"]) == 32.0, "loop points are reported");
+
+    // Stop.
+    r.events.clear();
+    r.hostInfo.playing = false;
+    r.block();
+    r.pump();
+    t = transports();
+    CHECK(t.size() == 1 && !static_cast<bool>(t[0]["playing"]), "stop produces a stopped event");
+
+    // Host that just stops calling process(): the message thread declares it stopped.
+    r.hostInfo.playing = true;
+    r.hostInfo.ppq = 4.0;
+    r.block();
+    r.pump();
+    r.events.clear();
+    for (int i = 0; i < 16; i++) r.pump();  // 16 ticks with no audio blocks
+    t = transports();
+    CHECK(t.size() == 1 && !static_cast<bool>(t[0]["playing"]), "a silent host is reported stopped after ~250 ms (%d events)", static_cast<int>(t.size()));
   }
 
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);

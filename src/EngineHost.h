@@ -40,8 +40,26 @@ class EngineHost : private juce::Timer {
   // Message thread: delivers queued engine events now (the timer does this at 60 Hz; tests call it directly).
   void flushEvents() { timerCallback(); }
 
+  // What the DAW's playhead says about this block (filled by the processor from AudioPlayHead).
+  struct HostTimeInfo {
+    bool valid = false;  // false: the host gave no usable position (treated as stopped)
+    bool playing = false;
+    double ppq = 0.0;  // quarter notes at the first sample of the block
+    double bpm = 120.0;
+    int sigNum = 4, sigDen = 4;
+    bool looping = false;
+    double loopStart = 0.0, loopEnd = 0.0;  // quarter notes
+  };
+
+  // Latency the plugin declares to the host (plugin delay compensation). The page learns of a transport
+  // start only after the fact (event queue + WebView hop), so the mapping it receives is shifted this far
+  // into the future: the page has this long to schedule the first notes, and the host delays everything
+  // else to match. See docs/host-transport.md in webdsp.
+  static constexpr double kHostLatencySeconds = 0.1;
+  int latencySamples() const { return static_cast<int>(kHostLatencySeconds * sampleRate_); }
+
   // Audio thread.
-  void process(juce::AudioBuffer<float>& buffer);
+  void process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host);
 
   // Frames rendered so far; the page's clock (currentTime = frames / sampleRate).
   int64_t framesRendered() const { return frame_.load(std::memory_order_acquire); }
@@ -63,13 +81,14 @@ class EngineHost : private juce::Timer {
     void* p = nullptr;
   };
 
-  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample };
+  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport };
   enum ErrorCode : int32_t { kErrAddEffect = 1, kErrCreateInstrument, kErrEffectLfo, kErrInstrumentLfo, kErrArmCapture, kErrQueueFull };
 
   struct Evt {
     EvtType type{};
     int32_t a = 0, b = 0, c = 0, len = 0;
     double dbl = 0.0;
+    double x[4]{};
     void* p = nullptr;
     float peaks[webdsp::Engine::kMeterCount]{};
   };
@@ -109,6 +128,7 @@ class EngineHost : private juce::Timer {
   void beginInit(const juce::var& message);
   juce::var buildReady(int maxVoices);
   void applyCmd(const Cmd& c, int64_t blockStart);
+  void trackTransport(const HostTimeInfo& host, int64_t blockStart, int numFrames);
   void readCapture(int32_t captureId, int32_t resultSampleId);
   void postEvt(const Evt& e);
   int64_t toFrame(double seconds) const;
@@ -124,6 +144,19 @@ class EngineHost : private juce::Timer {
 
   std::function<void(const juce::var&)> sink_;
   std::unordered_map<int32_t, SamplePayload*> loading_;  // message thread: samples being received
+
+  // audio thread state: host transport tracking
+  bool lastPlaying_ = false, lastLoopOn_ = false;
+  double lastBpm_ = 120.0, expectedPpq_ = 0.0, lastLoopStart_ = 0.0, lastLoopEnd_ = 0.0;
+  int lastSigNum_ = 4, lastSigDen_ = 4;
+  int32_t epoch_ = 0;
+  int64_t framesSinceTransportEvent_ = 0, framesSinceTempoEvent_ = 1 << 30;
+  std::atomic<bool> resendTransport_{true};  // set by the message thread when a page (re)connects
+
+  // message thread state: last transport event sent, to synthesize a stop if the host stops calling us
+  struct SentTransport { bool valid = false, playing = false; juce::var event; } lastSentTransport_;
+  int64_t lastSeenFrame_ = -1;
+  int stalledTicks_ = 0;
 
   // audio thread state
   std::unordered_map<int32_t, int32_t> armedCaptures_;  // captureId -> result sample id

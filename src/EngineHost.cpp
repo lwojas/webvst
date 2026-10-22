@@ -143,6 +143,8 @@ void EngineHost::beginInit(const juce::var& message) {
   swap.type = CmdType::SwapEngine;
   swap.p = fresh.release();
   pushCmd(swap);
+  resendTransport_.store(true, std::memory_order_relaxed);
+  lastSentTransport_ = {};
   send(buildReady(maxVoices));
 }
 
@@ -537,6 +539,60 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
   }
 }
 
+// Watches the host playhead and posts a HostTransport event when something a follower must know changed:
+// start/stop and locates/loop wraps (new epoch), tempo changes (same epoch, at most every ~43 ms), loop or
+// signature edits, a page (re)connecting, and a ~170 ms refresh while playing. No allocation, no waiting.
+void EngineHost::trackTransport(const HostTimeInfo& h, int64_t blockStart, int numFrames) {
+  const bool playing = h.valid && h.playing;
+  const double bpm = h.valid && h.bpm > 0.0 ? h.bpm : lastBpm_;
+  const double ppq = h.valid ? h.ppq : 0.0;
+  const bool loopOn = h.valid && h.looping && h.loopEnd > h.loopStart;
+  const double loopStart = loopOn ? h.loopStart : 0.0, loopEnd = loopOn ? h.loopEnd : 0.0;
+
+  framesSinceTransportEvent_ += numFrames;
+  framesSinceTempoEvent_ += numFrames;
+
+  bool emit = resendTransport_.exchange(false, std::memory_order_relaxed);
+  if (playing != lastPlaying_) {
+    epoch_++;
+    emit = true;
+  } else if (playing && std::fabs(ppq - expectedPpq_) > 0.02) {  // a locate or a loop wrap
+    epoch_++;
+    emit = true;
+  }
+  if (std::fabs(bpm - lastBpm_) > 0.001 && framesSinceTempoEvent_ >= 2048) emit = true;
+  if (loopOn != lastLoopOn_ || loopStart != lastLoopStart_ || loopEnd != lastLoopEnd_) emit = true;
+  if (h.valid && (h.sigNum != lastSigNum_ || h.sigDen != lastSigDen_)) emit = true;
+  if (playing && framesSinceTransportEvent_ >= 8192) emit = true;
+
+  if (emit) {
+    Evt ev;
+    ev.type = EvtType::HostTransport;
+    ev.a = (playing ? 1 : 0) | (loopOn ? 2 : 0) | (h.valid ? 4 : 0);
+    ev.b = h.sigNum;
+    ev.c = h.sigDen;
+    ev.len = epoch_;
+    ev.dbl = ppq;
+    ev.x[0] = bpm;
+    ev.x[1] = static_cast<double>(blockStart);
+    ev.x[2] = loopStart;
+    ev.x[3] = loopEnd;
+    postEvt(ev);
+    framesSinceTransportEvent_ = 0;
+    framesSinceTempoEvent_ = 0;
+    lastBpm_ = bpm;
+    lastLoopOn_ = loopOn;
+    lastLoopStart_ = loopStart;
+    lastLoopEnd_ = loopEnd;
+    if (h.valid) {
+      lastSigNum_ = h.sigNum;
+      lastSigDen_ = h.sigDen;
+    }
+  }
+  lastPlaying_ = playing;
+  expectedPpq_ = playing ? ppq + static_cast<double>(numFrames) / sampleRate_ * bpm / 60.0 : ppq;
+}
+
 // Copies a finished capture's PCM out of the engine (planar, one malloc) and hands it to the message
 // thread. An allocation, but only when the user finishes a resample.
 void EngineHost::readCapture(int32_t captureId, int32_t resultSampleId) {
@@ -562,12 +618,13 @@ void EngineHost::readCapture(int32_t captureId, int32_t resultSampleId) {
   engine_->discardCapture(captureId);
 }
 
-void EngineHost::process(juce::AudioBuffer<float>& buffer) {
+void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host) {
   const int numFrames = buffer.getNumSamples();
   const int64_t blockStart = frame_.load(std::memory_order_relaxed);
 
   Cmd cmd;
   while (cmds_.pop(cmd)) applyCmd(cmd, blockStart);
+  trackTransport(host, blockStart, numFrames);
 
   buffer.clear();
   if (engine_) {
@@ -639,6 +696,21 @@ void EngineHost::timerCallback() {
     switch (ev.type) {
       case EvtType::DisposeEngine: delete static_cast<webdsp::Engine*>(ev.p); break;
       case EvtType::DisposeSample: delete static_cast<SamplePayload*>(ev.p); break;
+      case EvtType::HostTransport: {
+        const bool playing = (ev.a & 1) != 0, loopOn = (ev.a & 2) != 0, hasSig = (ev.a & 4) != 0;
+        juce::var event = object(
+            {{"type", "host-transport"},
+             {"playing", playing},
+             {"bpm", ev.x[0]},
+             {"beat", ev.dbl},
+             {"time", ev.x[1] / sampleRate_ + kHostLatencySeconds},
+             {"loop", loopOn ? object({{"start", ev.x[2]}, {"end", ev.x[3]}}) : juce::var()},
+             {"timeSignature", hasSig ? object({{"numerator", ev.b}, {"denominator", ev.c}}) : juce::var()},
+             {"epoch", ev.len}});
+        lastSentTransport_ = {true, playing, event};
+        send(event);
+        break;
+      }
       case EvtType::VoiceEnded: send(object({{"type", "voice-ended"}, {"voice", ev.a}})); break;
       case EvtType::Diagnostics:
         send(object({{"type", "diagnostics"}, {"activeVoices", ev.a}, {"loadedSamples", ev.b}, {"sampleMemoryBytes", ev.dbl}}));
@@ -684,6 +756,18 @@ void EngineHost::timerCallback() {
   if (dropped != reportedDropped_.load(std::memory_order_relaxed)) {
     reportedDropped_.store(dropped, std::memory_order_relaxed);
     send(object({{"type", "error"}, {"message", "command queue full: " + juce::String(dropped) + " commands dropped"}}));
+  }
+
+  // Some hosts stop calling the plugin the moment their transport stops, so no "stopped" block ever
+  // arrives. If the frame counter has not moved for ~250 ms while the last transport we sent was playing,
+  // tell the page it stopped.
+  const int64_t frameNow = framesRendered();
+  stalledTicks_ = frameNow == lastSeenFrame_ ? stalledTicks_ + 1 : 0;
+  lastSeenFrame_ = frameNow;
+  if (stalledTicks_ >= 15 && lastSentTransport_.valid && lastSentTransport_.playing) {
+    if (auto* o = lastSentTransport_.event.getDynamicObject()) o->setProperty("playing", false);
+    lastSentTransport_.playing = false;
+    send(lastSentTransport_.event);
   }
 
   if ((++tick & 1) == 0) send(object({{"type", "__clock"}, {"frame", static_cast<double>(framesRendered())}, {"sampleRate", sampleRate_}}));
