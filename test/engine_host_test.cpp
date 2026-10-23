@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <new>
 #include "EngineHost.h"
+#include "SessionState.h"
 
 // ---- allocation counting (only while g_counting is set, i.e. inside the audio-thread call) ----------
 static std::atomic<bool> g_counting{false};
@@ -359,6 +360,127 @@ int main() {
     r.host.handleMessage(parse(R"({"type":"__init","maxVoices":8})"));
     const juce::var* ready = r.first("ready");
     CHECK(ready && static_cast<int>((*ready)["protocolVersion"]) == EngineHost::kProtocolVersion, "ready reports protocolVersion");
+  }
+
+  {  // Session state: the project saved in the DAW session
+    auto message = [](std::initializer_list<std::pair<const char*, juce::var>> props) {
+      auto* o = new juce::DynamicObject();
+      for (auto& p : props) o->setProperty(p.first, p.second);
+      return juce::var(o);
+    };
+    // What the shim does on publish(): begin, text chunks, blobs in chunks, commit.
+    auto publish = [&](SessionState& s, const juce::String& app, const juce::String& text,
+                       const std::map<juce::String, std::vector<uint8_t>>& blobs, const std::vector<juce::String>& resend) {
+      s.handleMessage(message({{"type", "state-begin"}, {"app", app}, {"format", 3}}));
+      for (int at = 0; at < text.length(); at += 1000) s.handleMessage(message({{"type", "state-text"}, {"data", text.substring(at, at + 1000)}}));
+      juce::Array<juce::var> keys;
+      for (const auto& [key, bytes] : blobs) {
+        keys.add(key);
+        if (std::find(resend.begin(), resend.end(), key) == resend.end()) continue;
+        s.handleMessage(message({{"type", "state-blob-begin"}, {"key", key}, {"bytes", static_cast<double>(bytes.size())}}));
+        for (size_t at = 0; at < bytes.size(); at += 5000) {
+          const size_t n = std::min<size_t>(5000, bytes.size() - at);
+          s.handleMessage(message({{"type", "state-blob-chunk"}, {"key", key}, {"offsetBytes", static_cast<double>(at)},
+                                   {"data", juce::Base64::toBase64(bytes.data() + at, n)}}));
+        }
+      }
+      s.handleMessage(message({{"type", "state-commit"}, {"keys", keys}}));
+    };
+    std::vector<uint8_t> sampleA(40000), sampleB(7000);
+    for (size_t i = 0; i < sampleA.size(); i++) sampleA[i] = static_cast<uint8_t>((i * 31) ^ (i >> 3));
+    for (size_t i = 0; i < sampleB.size(); i++) sampleB[i] = static_cast<uint8_t>(255 - i % 251);
+    juce::String text = R"({"project":"x","notes":[)";
+    for (int i = 0; i < 3000; i++) text += juce::String(i) + ",";
+    text += "0]}";
+
+    SessionState a("webseq");
+    CHECK(!a.hasState(), "starts with no state");
+    juce::MemoryBlock empty;
+    a.serialize(empty);
+    CHECK(empty.getSize() == 0, "no state saves nothing");
+
+    publish(a, "webseq", text, {{"1", sampleA}, {"2", sampleB}}, {"1", "2"});
+    CHECK(a.hasState() && a.app() == "webseq", "a committed snapshot is held");
+
+    juce::MemoryBlock saved;
+    a.serialize(saved);
+    CHECK(saved.getSize() > 0 && saved.getSize() < text.length() + sampleA.size() + sampleB.size() + 200, "the saved blob is compressed (%d bytes)", static_cast<int>(saved.getSize()));
+
+    // A re-publish that changes the text but resends no blob keeps the held blobs.
+    publish(a, "webseq", text + " ", {{"1", sampleA}, {"2", sampleB}}, {});
+    juce::MemoryBlock resaved;
+    a.serialize(resaved);
+    CHECK(resaved.getSize() > 0, "a re-publish without resending blobs still saves them");
+
+    // A commit naming a blob that was never sent is refused and the old snapshot survives.
+    {
+      SessionState b("webseq");
+      std::vector<juce::var> errors;
+      b.setEventSink([&](const juce::var& e) { errors.push_back(e); });
+      publish(b, "webseq", "{}", {{"1", sampleA}}, {"1"});
+      publish(b, "webseq", "{\"new\":1}", {{"1", sampleA}, {"9", sampleB}}, {"1"});  // key 9 never sent
+      CHECK(errors.size() == 1 && errors[0]["type"].toString() == "error", "a commit with a missing blob is reported");
+      juce::MemoryBlock still;
+      b.serialize(still);
+      SessionState c("webseq");
+      std::vector<juce::var> ev;
+      c.setEventSink([&](const juce::var& e) { ev.push_back(e); });
+      CHECK(c.restore(still.getData(), still.getSize()), "the surviving snapshot restores");
+      c.handleMessage(message({{"type", "state-ready"}}));
+      CHECK(ev.size() >= 3 && ev[1]["type"].toString() == "state-restore-text" && ev[1]["data"].toString() == "{}", "and it is the OLD snapshot, not the refused one");
+    }
+
+    // Host load -> page restore, reassembled exactly as the shim does.
+    SessionState loaded("webseq");
+    std::vector<juce::var> events;
+    loaded.setEventSink([&](const juce::var& e) { events.push_back(e); });
+    CHECK(loaded.restore(saved.getData(), saved.getSize()), "a saved blob restores");
+    CHECK(events.empty(), "nothing is sent while no page is listening");
+    loaded.handleMessage(message({{"type", "state-ready"}}));
+    CHECK(!events.empty() && events.front()["type"].toString() == "state-restore-begin" && events.back()["type"].toString() == "state-restore-end", "the page is sent begin ... end");
+    juce::String gotText;
+    std::map<juce::String, std::vector<uint8_t>> gotBlobs;
+    for (auto& e : events) {
+      const juce::String t = e["type"].toString();
+      if (t == "state-restore-begin") {
+        CHECK(static_cast<int>(e["format"]) == 3 && e["app"].toString() == "webseq", "app and format are carried");
+        for (auto& b : *e["blobs"].getArray()) gotBlobs[b["key"].toString()].assign(static_cast<size_t>(static_cast<double>(b["bytes"])), 0);
+      } else if (t == "state-restore-text") {
+        gotText += e["data"].toString();
+      } else if (t == "state-restore-blob") {
+        juce::MemoryOutputStream out;
+        juce::Base64::convertFromBase64(out, e["data"].toString());
+        std::memcpy(gotBlobs[e["key"].toString()].data() + static_cast<size_t>(static_cast<double>(e["offsetBytes"])), out.getData(), out.getDataSize());
+      }
+    }
+    CHECK(gotText == text, "the text round-trips through save, load and restore (%d chars)", gotText.length());
+    CHECK(gotBlobs["1"] == sampleA && gotBlobs["2"] == sampleB, "binary blobs round-trip byte for byte");
+
+    // A page already listening is handed a host-loaded state at once.
+    events.clear();
+    SessionState live("webseq");
+    live.setEventSink([&](const juce::var& e) { events.push_back(e); });
+    live.handleMessage(message({{"type", "state-ready"}}));
+    CHECK(events.empty(), "no state, nothing to restore");
+    live.restore(saved.getData(), saved.getSize());
+    CHECK(!events.empty() && events.back()["type"].toString() == "state-restore-end", "a listening page gets a host-loaded state immediately");
+
+    // Refusals: the other app's state, corrupt data, nothing.
+    SessionState other("webtracker");
+    CHECK(!other.restore(saved.getData(), saved.getSize()) && !other.hasState(), "state stamped for another app is refused");
+    SessionState any;
+    CHECK(any.restore(saved.getData(), saved.getSize()), "a plugin with no required app takes any state");
+    CHECK(any.app() == "webseq", "and keeps the app stamp (%s)", any.app().toRawUTF8());
+    juce::MemoryBlock corrupt(saved.getData(), saved.getSize() / 2);
+    SessionState fresh("webseq");
+    CHECK(!fresh.restore(corrupt.getData(), corrupt.getSize()) && !fresh.hasState(), "a truncated blob is refused");
+    CHECK(!fresh.restore("junkjunk", 8) && !fresh.restore(nullptr, 0), "junk and empty input are refused");
+
+    // New project.
+    a.handleMessage(message({{"type", "state-clear"}}));
+    juce::MemoryBlock cleared;
+    a.serialize(cleared);
+    CHECK(!a.hasState() && cleared.getSize() == 0, "clear drops the snapshot");
   }
 
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);

@@ -2,7 +2,8 @@
 #include "PluginEditor.h"
 
 WebVstProcessor::WebVstProcessor()
-    : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)) {}
+    : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      sessionState_(juce::String(WEBVST_APP_ID)) {}
 
 void WebVstProcessor::prepareToPlay(double sampleRate, int) {
   engineHost_.prepare(sampleRate);
@@ -36,6 +37,12 @@ void WebVstProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiB
     }
   }
   engineHost_.process(buffer, host, midiMessages);
+}
+
+// The DAW session holds the application's project (SessionState). Nothing here waits on the page.
+void WebVstProcessor::getStateInformation(juce::MemoryBlock& destination) { sessionState_.serialize(destination); }
+void WebVstProcessor::setStateInformation(const void* data, int sizeInBytes) {
+  sessionState_.restore(data, static_cast<size_t>(juce::jmax(0, sizeInBytes)));
 }
 
 juce::AudioProcessorEditor* WebVstProcessor::createEditor() { return new WebVstEditor(*this); }

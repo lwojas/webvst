@@ -248,6 +248,87 @@
     },
   });
 
+
+  // ---- host state: the project lives in the DAW session ------------------------------------------------
+  // webdsp's getHostState() returns this bridge. The page hands over an opaque snapshot (its JSON text plus
+  // binary blobs it refers to by key); the plugin keeps the latest in memory and saves it with the session, and
+  // hands it back when the page asks (onRestore) -- also when the session is reopened or the page reloaded.
+  var TEXT_CHUNK_CHARS = 200 * 1024;
+  var committedBlobs = new Map(); // key -> the ArrayBuffer the plugin already holds under it
+  var restoreListeners = [];
+  var lastRestore = null;
+  var restoreAssembly = null;
+  var announcedReady = false;
+
+  function postBlob(key, buffer) {
+    var bytes = new Uint8Array(buffer);
+    post({ type: 'state-blob-begin', key: key, bytes: bytes.length });
+    for (var at = 0; at < bytes.length; at += CHUNK_BYTES) {
+      post({ type: 'state-blob-chunk', key: key, offsetBytes: at, data: bytesToBase64(bytes.subarray(at, at + CHUNK_BYTES)) });
+    }
+  }
+
+  var hostState = {
+    publish: function (snapshot) {
+      lastRestore = null; // whatever the host handed back is no longer the current state
+      post({ type: 'state-begin', app: snapshot.app, format: snapshot.format });
+      var text = snapshot.data;
+      for (var at = 0; at < text.length; at += TEXT_CHUNK_CHARS) post({ type: 'state-text', data: text.slice(at, at + TEXT_CHUNK_CHARS) });
+      var keys = Object.keys(snapshot.blobs || {});
+      var next = new Map();
+      for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        var buffer = snapshot.blobs[key];
+        if (committedBlobs.get(key) !== buffer) postBlob(key, buffer); // the plugin already holds an identical one otherwise
+        next.set(key, buffer);
+      }
+      post({ type: 'state-commit', keys: keys });
+      committedBlobs = next;
+    },
+    clear: function () {
+      lastRestore = null;
+      committedBlobs = new Map();
+      post({ type: 'state-clear' });
+    },
+    onRestore: function (fn) {
+      restoreListeners.push(fn);
+      if (lastRestore) fn(lastRestore);
+      if (!announcedReady) {
+        announcedReady = true;
+        post({ type: 'state-ready' });
+      }
+      return function () {
+        restoreListeners = restoreListeners.filter(function (f) {
+          return f !== fn;
+        });
+      };
+    },
+  };
+  window.__webdspHost.state = hostState;
+
+  function onStateEvent(event) {
+    if (event.type === 'state-restore-begin') {
+      restoreAssembly = { app: event.app, format: event.format, text: [], blobs: {}, bytes: {} };
+      for (var i = 0; i < event.blobs.length; i++) restoreAssembly.bytes[event.blobs[i].key] = new Uint8Array(event.blobs[i].bytes);
+    } else if (event.type === 'state-restore-text' && restoreAssembly) {
+      restoreAssembly.text.push(event.data);
+    } else if (event.type === 'state-restore-blob' && restoreAssembly) {
+      var target = restoreAssembly.bytes[event.key];
+      if (target) target.set(new Uint8Array(base64ToBuffer(event.data)), event.offsetBytes);
+    } else if (event.type === 'state-restore-end' && restoreAssembly) {
+      var blobs = {};
+      Object.keys(restoreAssembly.bytes).forEach(function (key) {
+        blobs[key] = restoreAssembly.bytes[key].buffer;
+        committedBlobs.set(key, blobs[key]);
+      });
+      lastRestore = { app: restoreAssembly.app, format: restoreAssembly.format, data: restoreAssembly.text.join(''), blobs: blobs };
+      restoreAssembly = null;
+      restoreListeners.slice().forEach(function (fn) {
+        fn(lastRestore);
+      });
+    }
+  }
+
   // ---- page -> native ---------------------------------------------------------------------------
   function sendCommand(command) {
     if (command.type === 'load-sample') return sendSample(command.sample);
@@ -280,6 +361,10 @@
   // ---- native -> page ---------------------------------------------------------------------------
   backend.addEventListener(CHANNEL, function (event) {
     if (!event) return;
+    if (event.type && event.type.indexOf('state-restore-') === 0) {
+      onStateEvent(event);
+      return;
+    }
     if (event.type === 'midi') {
       deliverMidi(event.messages);
       return;

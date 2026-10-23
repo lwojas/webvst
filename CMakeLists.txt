@@ -36,12 +36,17 @@ juce_add_binary_data(WebVstData SOURCES src/shim.js)
 
 target_sources(WebVST PRIVATE
   src/EngineHost.cpp
+  src/SessionState.cpp
   src/PluginProcessor.cpp
   src/PluginEditor.cpp)
 
 target_include_directories(WebVST SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")
 
+# The application this plugin hosts, stamped on saved state; empty accepts any (see SessionState).
+set(WEBVST_APP_ID "" CACHE STRING "Application id stamped on saved state (empty: any)")
+
 target_compile_definitions(WebVST PUBLIC
+  WEBVST_APP_ID="${WEBVST_APP_ID}"
   JUCE_WEB_BROWSER=1
   JUCE_USE_CURL=0
   JUCE_VST3_CAN_REPLACE_VST2=0)
@@ -56,7 +61,7 @@ target_link_libraries(WebVST PRIVATE
 option(WEBVST_BUILD_TESTS "Build the EngineHost test executable" OFF)
 if(WEBVST_BUILD_TESTS)
   juce_add_console_app(WebVstHostTest PRODUCT_NAME "WebVstHostTest")
-  target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp)
+  target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp src/SessionState.cpp)
   target_include_directories(WebVstHostTest PRIVATE src)
   target_compile_definitions(WebVstHostTest PRIVATE WEBVST_WEBDSP_DIR_STR="${WEBVST_WEBDSP_DIR}" WEBVST_SHIM_PATH_STR="${CMAKE_CURRENT_SOURCE_DIR}/src/shim.js")
   target_include_directories(WebVstHostTest SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")

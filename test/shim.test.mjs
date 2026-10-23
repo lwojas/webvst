@@ -136,6 +136,83 @@ test("real MIDI ports are kept alongside the virtual one when the WebView has We
   restore();
 });
 
+test("host state: publish sends begin, text chunks, new blobs, then commit; unchanged blobs are not resent", async () => {
+  const { getHostState } = await import(pathToFileURL(path.join(webdsp, "lib/index.js")).href);
+  const state = getHostState();
+  assert.ok(state, "the shim installs the host state bridge");
+  const bigText = JSON.stringify({ notes: "x".repeat(450 * 1024) });
+  const sample = new Uint8Array(250 * 1024).map((_, n) => n % 251).buffer;
+
+  sent.length = 0;
+  state.publish({ app: "webseq", format: 1, data: bigText, blobs: { 7: sample } });
+  const types = sent.map((m) => m.type);
+  assert.equal(types[0], "state-begin");
+  assert.deepEqual({ app: sent[0].app, format: sent[0].format }, { app: "webseq", format: 1 });
+  assert.equal(types.filter((t) => t === "state-text").length, 3, "450 kB of text in 200 kB chunks");
+  assert.equal(sent.filter((m) => m.type === "state-text").map((m) => m.data).join(""), bigText);
+  assert.equal(sent.filter((m) => m.type === "state-blob-begin").length, 1);
+  const bytes = Buffer.concat(sent.filter((m) => m.type === "state-blob-chunk").sort((a, b) => a.offsetBytes - b.offsetBytes).map((c) => Buffer.from(c.data, "base64")));
+  assert.deepEqual(new Uint8Array(bytes), new Uint8Array(sample));
+  assert.deepEqual(types.at(-1), "state-commit");
+  assert.deepEqual(sent.at(-1).keys, ["7"]);
+
+  sent.length = 0;
+  state.publish({ app: "webseq", format: 1, data: "{}", blobs: { 7: sample } }); // same buffer object: not sent again
+  assert.deepEqual(sent.map((m) => m.type), ["state-begin", "state-text", "state-commit"]);
+
+  sent.length = 0;
+  state.publish({ app: "webseq", format: 1, data: "{}", blobs: { 7: sample.slice(0) } }); // a different buffer under the key: sent
+  assert.ok(sent.some((m) => m.type === "state-blob-begin"));
+
+  sent.length = 0;
+  state.clear();
+  assert.deepEqual(sent.map((m) => m.type), ["state-clear"]);
+  state.publish({ app: "webseq", format: 1, data: "{}", blobs: { 7: sample } }); // cleared: the plugin holds nothing, so resend
+  assert.ok(sent.some((m) => m.type === "state-blob-begin"));
+});
+
+test("host state: onRestore asks once, reassembles the restore, serves late subscribers, and unsubscribes", async () => {
+  const { getHostState } = await import(pathToFileURL(path.join(webdsp, "lib/index.js")).href);
+  const state = getHostState();
+  sent.length = 0;
+  const first = [];
+  const off = state.onRestore((snapshot) => first.push(snapshot));
+  assert.deepEqual(sent.filter((m) => m.type === "state-ready").length, 1);
+  state.onRestore(() => {});
+  assert.equal(sent.filter((m) => m.type === "state-ready").length, 1, "asks only once");
+
+  const blobA = Buffer.from(Array.from({ length: 150000 }, (_, n) => (n * 7) % 256));
+  native({ type: "state-restore-begin", app: "webtracker", format: 2, blobs: [{ key: "a", bytes: blobA.length }] });
+  native({ type: "state-restore-text", data: '{"song":' });
+  native({ type: "state-restore-text", data: '"x"}' });
+  for (let at = 0; at < blobA.length; at += 96 * 1024) {
+    native({ type: "state-restore-blob", key: "a", offsetBytes: at, data: blobA.subarray(at, at + 96 * 1024).toString("base64") });
+  }
+  assert.equal(first.length, 0, "nothing is delivered until the end");
+  native({ type: "state-restore-end" });
+  assert.equal(first.length, 1);
+  assert.equal(first[0].app, "webtracker");
+  assert.equal(first[0].format, 2);
+  assert.equal(first[0].data, '{"song":"x"}');
+  assert.deepEqual(Buffer.from(first[0].blobs.a), blobA);
+
+  const late = [];
+  state.onRestore((snapshot) => late.push(snapshot));
+  assert.equal(late.length, 1, "a subscriber that arrives later still gets it");
+
+  off();
+  native({ type: "state-restore-begin", app: "webtracker", format: 2, blobs: [] });
+  native({ type: "state-restore-text", data: "{}" });
+  native({ type: "state-restore-end" });
+  assert.equal(first.length, 1, "unsubscribed");
+  assert.equal(late.length, 2);
+
+  state.publish({ app: "webtracker", format: 2, data: "{}", blobs: {} }); // the app's own state replaces what the host handed back
+  const afterPublish = [];
+  state.onRestore((snapshot) => afterPublish.push(snapshot));
+  assert.equal(afterPublish.length, 0);
+});
+
 test("samples are sent in chunks and reassemble to the same bytes", () => {
   sent.length = 0;
   const floats = new Float32Array(100000).map((_, i) => Math.sin(i / 50));
