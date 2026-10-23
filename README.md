@@ -53,6 +53,15 @@ The bundle lands under `build/WebVST_artefacts/`. Copy it to `~/Library/Audio/Pl
 Headless: drives EngineHost with the page's JSON, checks audio, scheduling accuracy, and counts audio-thread
 allocations per command type.
 
+## DAW state (the project in the session)
+
+The page publishes its project (opaque JSON plus sample blobs, stamped with the app and format) through
+webdsp's `getHostState()`; `SessionState` keeps the latest in memory and `getStateInformation` saves it gzip-compressed
+(`WVST` header, end marker), `setStateInformation` loads it and hands it to the page when it asks, or says nothing is
+saved. Set `-DWEBVST_APP_ID=webseq` (or `webtracker`) to make a plugin refuse the other app's state. Saving never waits on
+the page, so a session saves correctly with the editor closed. `test/e2e/hoststate-e2e.cjs` is a manual browser check of
+the round trip against the real clients.
+
 ## Client URL
 
 Defaults to `http://localhost:5174` (webseq `npm run dev`). Override with the `WEBVST_URL` environment variable
