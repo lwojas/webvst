@@ -2,7 +2,8 @@
 #include <BinaryData.h>
 
 namespace {
-constexpr const char* kDefaultUrl = "http://localhost:5174";  // webseq's `npm run dev`
+// Each plugin's own default (WEBVST_DEFAULT_URL, set per target in CMakeLists.txt): its client's `npm run dev`.
+constexpr const char* kDefaultUrl = WEBVST_DEFAULT_URL;
 }
 
 // Tells the editor when the page navigates, so events are not emitted into a page whose JUCE
@@ -19,9 +20,13 @@ class WebVstEditor::Web : public juce::WebBrowserComponent {
   std::function<void()> onNavigate_;
 };
 
+// The page to load: WEBVST_URL_<APP> (e.g. WEBVST_URL_WEBSEQ) for this plugin alone, else WEBVST_URL for any, else the
+// default. The per-app variable lets two plugins in one host point at different servers.
 juce::String WebVstEditor::resolveUrl() {
-  auto fromEnv = juce::SystemStats::getEnvironmentVariable("WEBVST_URL", {});
-  return fromEnv.isNotEmpty() ? fromEnv : juce::String(kDefaultUrl);
+  const auto perApp = juce::SystemStats::getEnvironmentVariable("WEBVST_URL_" + juce::String(WEBVST_APP_ID).toUpperCase(), {});
+  if (perApp.isNotEmpty()) return perApp;
+  const auto any = juce::SystemStats::getEnvironmentVariable("WEBVST_URL", {});
+  return any.isNotEmpty() ? any : juce::String(kDefaultUrl);
 }
 
 WebVstEditor::WebVstEditor(WebVstProcessor& p) : AudioProcessorEditor(&p), processor_(p) {

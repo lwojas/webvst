@@ -37,7 +37,8 @@ how those repos build.
 | `src/EngineHost.*` | One `webdsp::Engine` per instance. Mirrors `webdsp/src/worklet/engine-processor.ts`: message thread parses a command into a fixed-size `Cmd`, the audio thread applies it at the top of a block and renders. Also host transport tracking and MIDI forwarding. |
 | `src/SessionState.*` | The project in the DAW session: the page publishes an opaque, app-stamped snapshot (JSON + blobs); held in memory, saved gzip-compressed by `getStateInformation`, handed back on `state-ready`. |
 | `src/HostFiles.*` | Open/save through native dialogs (injectable chooser; JUCE `FileChooser` in the plugin). |
-| `src/PluginProcessor.*`, `src/PluginEditor.*` | JUCE plumbing. The editor is a `WebBrowserComponent` loading `WEBVST_URL` (default `http://localhost:5174`), routing page messages to `SessionState` / `HostFiles` / `EngineHost`. |
+| `src/PluginProcessor.*`, `src/PluginEditor.*` | JUCE plumbing. The editor is a `WebBrowserComponent` loading the plugin's URL (per-app default, env overrides), routing page messages to `SessionState` / `HostFiles` / `EngineHost`. |
+| `CMakeLists.txt` | `webvst_add_plugin(...)`: one plugin per client from the same sources (WebSeq, WebTracker); each has its own plugin ID, app stamp and default URL. |
 
 ## What crosses the bridge (the `"webvst"` event channel)
 
@@ -59,7 +60,7 @@ else to match. Clock: the native rendered-frame count (~30 Hz); the page extrapo
 ```
 git clone --recurse-submodules https://github.com/lwojas/webvst.git
 cmake -B build -DWEBVST_BUILD_TESTS=ON            # JUCE is fetched at configure (a few minutes the first time)
-cmake --build build --target WebVST_VST3          # build/WebVST_artefacts/VST3/WebVST.vst3
+cmake --build build --target WebSeq_VST3 WebTracker_VST3   # build/WebSeq_artefacts/VST3/WebSeq.vst3, build/WebTracker_artefacts/...
 cmake --build build --target WebVstHostTest && find build -name WebVstHostTest -type f -exec {} \;
 node --test test/                                  # the shim against the real webdsp runtime, no browser
 ```
@@ -71,22 +72,25 @@ node --test test/                                  # the shim against the real w
 - **Manual e2e** (`e2e/hoststate-e2e.cjs`): the real clients in Chromium with the real shim and a fake native.
 - **CI** (`.github/workflows/ci.yml`): build + tests against the pinned webdsp on push/PR; a nightly job builds and tests
   against webdsp `main` to catch drift early.
-- `-DWEBVST_WEBDSP_DIR=../webdsp` builds against a working copy; `-DWEBVST_APP_ID=webseq|webtracker` makes a plugin
-  refuse the other app's saved state.
+- `-DWEBVST_WEBDSP_DIR=../webdsp` builds against a working copy.
 
 ## Day to day
 
 - **Develop a client or webdsp as usual**, in the browser. To see it in the plugin, run the client's dev server and load
-  the plugin (default URL `http://localhost:5174`; `WEBVST_URL` in the host's environment overrides). Restart the dev server after
-  changing the `webdsp` dependency (Vite caches it).
+  its plugin (WebSeq opens `http://localhost:5174`, WebTracker `http://localhost:5175`; `WEBVST_URL_WEBSEQ` /
+  `WEBVST_URL_WEBTRACKER` in the host's environment override one plugin, `WEBVST_URL` any plugin without its own). Restart the dev
+  server after changing the `webdsp` dependency (Vite caches it).
 - **Rebuilt the plugin and the DAW still behaves the old way?** The DAW caches plugins: replace the bundle in
   `~/Library/Audio/Plug-Ins/VST3/` with the host closed, then rescan.
 - **Bump webdsp:** `git -C third_party/webdsp fetch && git -C third_party/webdsp checkout <sha> && git add third_party/webdsp`,
   run the tests. webdsp's protocol is additive (`webdsp/docs/native-host.md`), so a bump is normally just a bump.
 - **A new webdsp command** needs a case in `EngineHost::handleMessage` (and `handledMessageTypes`); the host test fails until
   it has one. A new instrument/effect kind or parameter needs nothing here (the engine describes itself).
-- **Add a client:** it needs no plugin code. Give it a default URL (a second `juce_add_plugin` target with its own plugin ID
-  and `WEBVST_APP_ID`), and have it use the seams it wants (`getHostState`, `getHostFiles`, `onHostTransport`).
+- **Add a client:** it needs no plugin code. Add one line in `CMakeLists.txt`,
+  `webvst_add_plugin(Name PRODUCT "Name" CODE Nxxx APP_ID name DEFAULT_URL "http://localhost:PORT")`: its own plugin ID (a
+  4-character code, unique), the app name stamped on its saved state (the plugin refuses another app's), and its default URL.
+  The client then uses the seams it wants (`getHostState`, `getHostFiles`, `onHostTransport`). Both existing plugins are built
+  this way, from the same sources.
 
 ## Known limits and not done yet
 
