@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <new>
 #include "EngineHost.h"
 
@@ -295,6 +296,69 @@ int main() {
         CHECK(static_cast<double>((*arr)[3]["time"]) > t0, "order and timing preserved");
       }
     }
+  }
+
+  {  // Protocol contract with webdsp
+    const juce::File webdsp(WEBVST_WEBDSP_DIR_STR);
+    const juce::String ts = webdsp.getChildFile("src/runtime/commandProtocol.ts").loadFileAsString();
+    CHECK(ts.isNotEmpty(), "webdsp's commandProtocol.ts is readable at %s", WEBVST_WEBDSP_DIR_STR);
+
+    const int unionStart = ts.indexOf("export type HostCommand =");
+    const int unionEnd = ts.indexOf("export type WorkletEvent");
+    CHECK(unionStart >= 0 && unionEnd > unionStart, "found the HostCommand union");
+    const juce::String region = ts.substring(unionStart, unionEnd);
+
+    // Every `{ type: "name"` in the union.
+    std::vector<juce::String> commandTypes;
+    for (int at = region.indexOf("type: \""); at >= 0; at = region.indexOf(at + 1, "type: \"")) {
+      const int from = at + 7, to = region.indexOf(from, "\"");
+      if (to > from) commandTypes.push_back(region.substring(from, to));
+    }
+    CHECK(commandTypes.size() >= 25, "parsed %d HostCommand types", static_cast<int>(commandTypes.size()));
+
+    // load-sample is split into sample-begin/chunk/end by the shim; everything else must be handled by name.
+    const auto& handled = EngineHost::handledMessageTypes();
+    int missing = 0;
+    for (const auto& name : commandTypes) {
+      if (name == "load-sample") continue;
+      if (std::find(handled.begin(), handled.end(), name) == handled.end()) {
+        std::printf("      not handled by the plugin: %s\n", name.toRawUTF8());
+        missing++;
+      }
+    }
+    CHECK(missing == 0, "the plugin handles every HostCommand type in webdsp (%d missing)", missing);
+    const juce::String shim = juce::File(WEBVST_WEBDSP_DIR_STR).getParentDirectory().getChildFile("webvst/src/shim.js").loadFileAsString();
+    CHECK(shim.isEmpty() || shim.contains("load-sample"), "the shim translates load-sample");
+
+    // And the list is true: sending a bare message of each type is not reported as unknown.
+    {
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":8})"));
+      r.events.clear();
+      for (const auto& name : handled) {
+        if (name == "__init") continue;
+        auto* o = new juce::DynamicObject();
+        o->setProperty("type", name);
+        r.host.handleMessage(juce::var(o));
+      }
+      int unknown = 0;
+      for (auto& e : r.events)
+        if (e["type"].toString() == "error" && e["message"].toString().contains("does not understand")) unknown++;
+      CHECK(unknown == 0, "every type in handledMessageTypes() is dispatched (%d reported unknown)", unknown);
+
+      r.events.clear();
+      r.host.handleMessage(parse(R"({"type":"from-the-future"})"));
+      CHECK(r.count("error") == 1, "an unknown command is reported to the page");
+    }
+
+    // The ready event carries the version, and it matches webdsp's.
+    const int versionAt = ts.indexOf("HOST_PROTOCOL_VERSION = ");
+    const int tsVersion = versionAt >= 0 ? ts.substring(versionAt + 24).getIntValue() : -1;
+    CHECK(tsVersion == EngineHost::kProtocolVersion, "plugin protocol version %d matches webdsp's %d", EngineHost::kProtocolVersion, tsVersion);
+    Rig r;
+    r.host.handleMessage(parse(R"({"type":"__init","maxVoices":8})"));
+    const juce::var* ready = r.first("ready");
+    CHECK(ready && static_cast<int>((*ready)["protocolVersion"]) == EngineHost::kProtocolVersion, "ready reports protocolVersion");
   }
 
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);

@@ -94,6 +94,17 @@ constexpr int kTimerHz = 120;
 
 EngineHost::EngineHost() { startTimerHz(kTimerHz); }
 
+const std::vector<juce::String>& EngineHost::handledMessageTypes() {
+  static const std::vector<juce::String> types = {
+      "__init", "sample-begin", "sample-chunk", "sample-end", "unload-sample", "trigger", "schedule", "release", "stop",
+      "set-voice-param", "set-bus-param", "add-effect", "remove-effect", "move-effect", "set-effect-enabled",
+      "set-effect-param", "set-effect-lfo", "set-instrument-lfo", "create-instrument", "remove-instrument",
+      "instrument-note-on", "instrument-note-off", "set-instrument-param", "set-transport", "set-sample-regions",
+      "set-sample-param", "schedule-params", "cancel-scheduled", "start-capture", "stop-capture", "arm-capture",
+      "configure"};
+  return types;
+}
+
 EngineHost::~EngineHost() {
   stopTimer();
   for (auto& kv : loading_) {
@@ -174,6 +185,7 @@ juce::var EngineHost::buildReady(int maxVoices) {
                           {"beats", static_cast<double>(webdsp::kLfoDivisionBeats[i])}}));
   }
   return object({{"type", "ready"},
+                 {"protocolVersion", kProtocolVersion},
                  {"sampleRate", sampleRate_},
                  {"outputChannels", kOutputChannels},
                  {"maxVoices", maxVoices},
@@ -437,6 +449,10 @@ void EngineHost::handleMessage(const juce::var& msg) {
     c.type = CmdType::ConfigureVoices;
     c.i[0] = integer(msg, "maxVoices", kDefaultMaxVoices);
     pushCmd(c);
+  } else if (type.isNotEmpty()) {
+    // A command this plugin does not know: tell the page instead of ignoring it, so a newer web app against an
+    // older plugin shows up as an error rather than as a feature that silently does nothing.
+    send(object({{"type", "error"}, {"message", "plugin does not understand command '" + type + "' (the plugin may be older than this app)"}}));
   }
 }
 

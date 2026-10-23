@@ -53,6 +53,7 @@ if(WEBVST_BUILD_TESTS)
   juce_add_console_app(WebVstHostTest PRODUCT_NAME "WebVstHostTest")
   target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp)
   target_include_directories(WebVstHostTest PRIVATE src)
+  target_compile_definitions(WebVstHostTest PRIVATE WEBVST_WEBDSP_DIR_STR="${WEBVST_WEBDSP_DIR}")
   target_include_directories(WebVstHostTest SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")
   target_link_libraries(WebVstHostTest PRIVATE
     juce::juce_core juce::juce_events juce::juce_audio_basics

@@ -31,6 +31,14 @@ class EngineHost : private juce::Timer {
   void prepare(double sampleRate);
   double sampleRate() const { return sampleRate_; }
 
+  // The webdsp command/event protocol version this host implements (webdsp/src/runtime/commandProtocol.ts,
+  // HOST_PROTOCOL_VERSION). Reported in the ready event so a newer web app can notice an older plugin.
+  static constexpr int kProtocolVersion = 1;
+
+  // Every message type handleMessage understands: the HostCommand types plus the shim's own sample-transfer
+  // messages. Tests check that it covers webdsp's HostCommand union.
+  static const std::vector<juce::String>& handledMessageTypes();
+
   // Message thread: one HostCommand (or one of the shim's own control messages) as sent by the page.
   void handleMessage(const juce::var& message);
 
