@@ -27,8 +27,8 @@ jobs:
         run: |
           cmake --build build --target WebVstHostTest -j 4
           find build -name WebVstHostTest -type f -exec {} \;
-      - name: Plugin
-        run: cmake --build build --target WebVST_VST3 -j 4
+      - name: Plugins (WebSeq and WebTracker)
+        run: cmake --build build --target WebSeq_VST3 WebTracker_VST3 -j 4
 
   webdsp-main:
     name: Build and test against webdsp main (drift check)

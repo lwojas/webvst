@@ -19,44 +19,53 @@ FetchContent_Declare(JUCE
   GIT_SHALLOW ON)
 FetchContent_MakeAvailable(JUCE)
 
-juce_add_plugin(WebVST
-  PRODUCT_NAME "WebVST"
-  COMPANY_NAME "lwojas"
-  PLUGIN_MANUFACTURER_CODE Lwjs
-  PLUGIN_CODE Wvst
-  FORMATS VST3
-  IS_SYNTH TRUE
-  NEEDS_MIDI_INPUT TRUE
-  NEEDS_MIDI_OUTPUT FALSE
-  NEEDS_WEB_BROWSER TRUE
-  COPY_PLUGIN_AFTER_BUILD FALSE)
-
 # The page shim is a real .js file, embedded as BinaryData::shim_js.
 juce_add_binary_data(WebVstData SOURCES src/shim.js)
 
-target_sources(WebVST PRIVATE
-  src/EngineHost.cpp
-  src/SessionState.cpp
-  src/HostFiles.cpp
-  src/PluginProcessor.cpp
-  src/PluginEditor.cpp)
+# One plugin per web client, from the same sources: each has its own plugin ID and name (so a DAW lists them separately),
+# the application id stamped on its saved state (a plugin refuses the other app's state; see SessionState), and the URL
+# its editor opens by default (overridable at run time, see PluginEditor.cpp).
+function(webvst_add_plugin target)
+  cmake_parse_arguments(P "" "PRODUCT;CODE;APP_ID;DEFAULT_URL" "" ${ARGN})
 
-target_include_directories(WebVST SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")
+  juce_add_plugin(${target}
+    PRODUCT_NAME "${P_PRODUCT}"
+    COMPANY_NAME "lwojas"
+    PLUGIN_MANUFACTURER_CODE Lwjs
+    PLUGIN_CODE ${P_CODE}
+    FORMATS VST3
+    IS_SYNTH TRUE
+    NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT FALSE
+    NEEDS_WEB_BROWSER TRUE
+    COPY_PLUGIN_AFTER_BUILD FALSE)
 
-# The application this plugin hosts, stamped on saved state; empty accepts any (see SessionState).
-set(WEBVST_APP_ID "" CACHE STRING "Application id stamped on saved state (empty: any)")
+  target_sources(${target} PRIVATE
+    src/EngineHost.cpp
+    src/SessionState.cpp
+    src/HostFiles.cpp
+    src/PluginProcessor.cpp
+    src/PluginEditor.cpp)
 
-target_compile_definitions(WebVST PUBLIC
-  WEBVST_APP_ID="${WEBVST_APP_ID}"
-  JUCE_WEB_BROWSER=1
-  JUCE_USE_CURL=0
-  JUCE_VST3_CAN_REPLACE_VST2=0)
+  target_include_directories(${target} SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")
 
-target_link_libraries(WebVST PRIVATE
-  WebVstData
-  juce::juce_audio_utils
-  juce::juce_gui_extra
-  PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+  target_compile_definitions(${target} PUBLIC
+    WEBVST_APP_ID="${P_APP_ID}"
+    WEBVST_DEFAULT_URL="${P_DEFAULT_URL}"
+    JUCE_WEB_BROWSER=1
+    JUCE_USE_CURL=0
+    JUCE_VST3_CAN_REPLACE_VST2=0)
+
+  target_link_libraries(${target} PRIVATE
+    WebVstData
+    juce::juce_audio_utils
+    juce::juce_gui_extra
+    PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+endfunction()
+
+# Default URLs are each client's Vite dev server (webseq 5174, webtracker 5175).
+webvst_add_plugin(WebSeq PRODUCT "WebSeq" CODE Wsqr APP_ID webseq DEFAULT_URL "http://localhost:5174")
+webvst_add_plugin(WebTracker PRODUCT "WebTracker" CODE Wtrk APP_ID webtracker DEFAULT_URL "http://localhost:5175")
 
 # Headless test of EngineHost (command queue, dispatcher, events, allocation behaviour): -DWEBVST_BUILD_TESTS=ON
 option(WEBVST_BUILD_TESTS "Build the EngineHost test executable" OFF)

@@ -25,7 +25,7 @@ the open/save dialogs are verified headless and in Chromium against the real cli
 
     git clone --recurse-submodules https://github.com/lwojas/webvst.git    # or: git submodule update --init
     cmake -B build
-    cmake --build build --target WebVST_VST3
+    cmake --build build --target WebSeq_VST3 WebTracker_VST3
 
 webdsp is pinned as a submodule (`third_party/webdsp`); this repo is a built target that pulls webdsp and
 the web clients rather than owning them. Bump webdsp with
@@ -33,7 +33,11 @@ the web clients rather than owning them. Bump webdsp with
 tests. To build against a working copy, pass `-DWEBVST_WEBDSP_DIR=../webdsp`. Webdsp's protocol is additive
 (`docs/native-host.md` there); the host test fails if the plugin stops handling a webdsp command.
 
-The bundle lands under `build/WebVST_artefacts/`. Copy it to `~/Library/Audio/Plug-Ins/VST3/` to load it in a host.
+Two plugins are built from the same sources, one per web client: **WebSeq** and **WebTracker**. The bundles land under
+`build/WebSeq_artefacts/VST3/` and `build/WebTracker_artefacts/VST3/`; copy them to `~/Library/Audio/Plug-Ins/VST3/` to load
+them in a host. Each has its own plugin ID (so the DAW lists them separately), the app name stamped on its saved state (a
+plugin refuses the other app's state), and its own default URL. (The earlier single "WebVST" bundle is gone; delete
+`WebVST.vst3` from the plug-ins folder. Sessions saved with it do not load in the new plugins.)
 
 ## MIDI and transport
 
@@ -59,11 +63,12 @@ allocations per command type.
 The page publishes its project (opaque JSON plus sample blobs, stamped with the app and format) through
 webdsp's `getHostState()`; `SessionState` keeps the latest in memory and `getStateInformation` saves it gzip-compressed
 (`WVST` header, end marker), `setStateInformation` loads it and hands it to the page when it asks, or says nothing is
-saved. Set `-DWEBVST_APP_ID=webseq` (or `webtracker`) to make a plugin refuse the other app's state. Saving never waits on
+saved. Each plugin refuses the other app's state (its `WEBVST_APP_ID`). Saving never waits on
 the page, so a session saves correctly with the editor closed. `e2e/hoststate-e2e.cjs` is a manual browser check of
 the round trip against the real clients.
 
 ## Client URL
 
-Defaults to `http://localhost:5174` (webseq `npm run dev`). Override with the `WEBVST_URL` environment variable
-of the host process.
+Each plugin opens its client's dev server by default: WebSeq `http://localhost:5174`, WebTracker `http://localhost:5175` (each
+client's `npm run dev`). Override in the host process's environment: `WEBVST_URL_WEBSEQ` / `WEBVST_URL_WEBTRACKER` for one plugin,
+or `WEBVST_URL` for any plugin without its own variable.
