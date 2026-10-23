@@ -81,9 +81,10 @@ node --test test/                                  # the shim against the real w
   `WEBVST_URL_WEBTRACKER` in the host's environment override one plugin, `WEBVST_URL` any plugin without its own). Restart the dev
   server after changing the `webdsp` dependency (Vite caches it).
 - **Ableton Live does not list the plugin, though REAPER does?** Look in `~/Library/Preferences/Ableton/Live <version>/PluginScanner.txt`
-  for the bundle's name. `Failed to load plugin: a sealed resource is missing or invalid` is a broken code signature: JUCE adds
-  `Contents/Resources/moduleinfo.json` after signing, so the build re-signs the finished bundle as its last step
-  (`CMakeLists.txt`, `webvst_add_plugin`; CI verifies it). Check a bundle with `codesign -vv --strict <bundle>`; it must say
+  for the bundle's name. `Failed to load plugin: a sealed resource is missing or invalid` is a broken code signature. A clean build used to produce one:
+  JUCE signs the bundle and only then adds `Contents/Resources/moduleinfo.json` (an incremental rebuild happens to seal the
+  previous copy first, which hid it). The build now re-signs the finished bundle as its last step (`CMakeLists.txt`,
+  `webvst_add_plugin`), and CI verifies a clean build's signature. Check a bundle with `codesign -vv --strict <bundle>`; it must say
   "valid on disk". REAPER does not check the seal, so a broken signature only shows up in Ableton.
 - **Rebuilt the plugin and the DAW still behaves the old way?** The DAW caches plugins: replace the bundle in
   `~/Library/Audio/Plug-Ins/VST3/` with the host closed, then rescan.
