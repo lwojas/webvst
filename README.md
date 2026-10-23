@@ -2,10 +2,11 @@
 
 VST3 wrapper around the webdsp engine, hosting an unmodified web client (webseq / webtracker) in a WebView.
 Independent of the web build pipelines: it consumes webdsp's header-only engine (`native/src/engine.h`) and
-loads the client from a URL. See the feasibility report for the architecture.
+loads the client from a URL. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture, the bridge protocol and the
+build pipeline.
 
-Status: audio wired. The page's unmodified `AudioRuntime` drives a native webdsp engine through a bridge.
-Host transport and DAW MIDI reach the page; DAW state (saving the project in the session) is not done yet.
+Status: audio, DAW transport, DAW MIDI, the project saved in the DAW session, and open/save dialogs work; tested in REAPER and
+Ableton Live on macOS. Not done: closing the editor stops playback (the page sequences), native MIDI routing, release packaging.
 
 ## How it fits together
 
