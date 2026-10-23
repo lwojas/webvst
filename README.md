@@ -5,8 +5,8 @@ Independent of the web build pipelines: it consumes webdsp's header-only engine 
 loads the client from a URL. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture, the bridge protocol and the
 build pipeline.
 
-Status: audio, DAW transport, DAW MIDI, the project saved in the DAW session, and open/save dialogs work; tested in REAPER and
-Ableton Live on macOS. Not done: closing the editor stops playback (the page sequences), native MIDI routing, release packaging.
+Status: audio, DAW transport and DAW MIDI are tested in REAPER and Ableton Live on macOS. The project saved in the DAW session and
+the open/save dialogs are verified headless and in Chromium against the real clients, not yet in a DAW. Not done: closing the editor stops playback (the page sequences), native MIDI routing, release packaging.
 
 ## How it fits together
 
