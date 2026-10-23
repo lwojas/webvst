@@ -338,6 +338,58 @@
     }
   }
 
+
+  // ---- host files: the host's own open/save dialogs ---------------------------------------------------
+  // webdsp's getHostFiles() returns this bridge. A plugin's WebView (macOS WKWebView) has no file input and ignores
+  // downloads, so the page asks the plugin to show the dialog and read/write the file.
+  var nextFileId = 1;
+  var fileCalls = {};
+
+  var hostFiles = {
+    saveFile: function (options) {
+      return new Promise(function (resolve, reject) {
+        var id = nextFileId++;
+        var data = options.data;
+        var bytes = typeof data === 'string' ? new TextEncoder().encode(data) : new Uint8Array(data);
+        fileCalls[id] = { resolve: resolve, reject: reject };
+        post({ type: 'files-save-begin', id: id, name: options.suggestedName, bytes: bytes.length });
+        for (var at = 0; at < bytes.length; at += CHUNK_BYTES) {
+          post({ type: 'files-save-chunk', id: id, offsetBytes: at, data: bytesToBase64(bytes.subarray(at, at + CHUNK_BYTES)) });
+        }
+        post({ type: 'files-save-end', id: id });
+      });
+    },
+    openFile: function (options) {
+      return new Promise(function (resolve, reject) {
+        var id = nextFileId++;
+        fileCalls[id] = { resolve: resolve, reject: reject, assembly: null };
+        post({ type: 'files-open', id: id, extensions: (options && options.extensions) || [] });
+      });
+    },
+  };
+  window.__webdspHost.files = hostFiles;
+
+  function onFilesEvent(event) {
+    var call = fileCalls[event.id];
+    if (!call) return;
+    if (event.type === 'files-save-result') {
+      delete fileCalls[event.id];
+      if (event.error) call.reject(new Error(event.error));
+      else call.resolve(event.name === null || event.name === undefined ? null : { name: event.name });
+    } else if (event.type === 'files-open-result') {
+      delete fileCalls[event.id];
+      if (event.error) call.reject(new Error(event.error));
+      else call.resolve(null); // cancelled
+    } else if (event.type === 'files-open-begin') {
+      call.assembly = { name: event.name, bytes: new Uint8Array(event.bytes) };
+    } else if (event.type === 'files-open-chunk' && call.assembly) {
+      call.assembly.bytes.set(new Uint8Array(base64ToBuffer(event.data)), event.offsetBytes);
+    } else if (event.type === 'files-open-end' && call.assembly) {
+      delete fileCalls[event.id];
+      call.resolve({ name: call.assembly.name, data: call.assembly.bytes.buffer });
+    }
+  }
+
   // ---- page -> native ---------------------------------------------------------------------------
   function sendCommand(command) {
     if (command.type === 'load-sample') return sendSample(command.sample);
@@ -370,6 +422,10 @@
   // ---- native -> page ---------------------------------------------------------------------------
   backend.addEventListener(CHANNEL, function (event) {
     if (!event) return;
+    if (event.type && event.type.indexOf('files-') === 0) {
+      onFilesEvent(event);
+      return;
+    }
     if (event.type && event.type.indexOf('state-restore-') === 0) {
       onStateEvent(event);
       return;

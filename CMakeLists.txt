@@ -37,6 +37,7 @@ juce_add_binary_data(WebVstData SOURCES src/shim.js)
 target_sources(WebVST PRIVATE
   src/EngineHost.cpp
   src/SessionState.cpp
+  src/HostFiles.cpp
   src/PluginProcessor.cpp
   src/PluginEditor.cpp)
 
@@ -61,7 +62,7 @@ target_link_libraries(WebVST PRIVATE
 option(WEBVST_BUILD_TESTS "Build the EngineHost test executable" OFF)
 if(WEBVST_BUILD_TESTS)
   juce_add_console_app(WebVstHostTest PRODUCT_NAME "WebVstHostTest")
-  target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp src/SessionState.cpp)
+  target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp src/SessionState.cpp src/HostFiles.cpp)
   target_include_directories(WebVstHostTest PRIVATE src)
   target_compile_definitions(WebVstHostTest PRIVATE WEBVST_WEBDSP_DIR_STR="${WEBVST_WEBDSP_DIR}" WEBVST_SHIM_PATH_STR="${CMAKE_CURRENT_SOURCE_DIR}/src/shim.js")
   target_include_directories(WebVstHostTest SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")

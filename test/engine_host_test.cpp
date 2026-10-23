@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <new>
 #include "EngineHost.h"
+#include "HostFiles.h"
 #include "SessionState.h"
 
 // ---- allocation counting (only while g_counting is set, i.e. inside the audio-thread call) ----------
@@ -482,6 +483,110 @@ int main() {
     juce::MemoryBlock cleared;
     a.serialize(cleared);
     CHECK(!a.hasState() && cleared.getSize() == 0, "clear drops the snapshot");
+  }
+
+  {  // Host files: the dialogs are injected, so this runs headless
+    auto message = [](std::initializer_list<std::pair<const char*, juce::var>> props) {
+      auto* o = new juce::DynamicObject();
+      for (auto& p : props) o->setProperty(p.first, p.second);
+      return juce::var(o);
+    };
+    const juce::File dir = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("webvst-hostfiles-test");
+    dir.deleteRecursively();
+    dir.createDirectory();
+
+    juce::File nextChoice;                 // what the fake dialog "picks"
+    std::vector<HostFiles::ChooserRequest> requests;
+    std::function<void(juce::File)> parked;  // a dialog left open
+    bool park = false;
+    HostFiles files([&](const HostFiles::ChooserRequest& r, std::function<void(juce::File)> done) {
+      requests.push_back(r);
+      if (park) parked = std::move(done);
+      else done(nextChoice);
+    });
+    std::vector<juce::var> events;
+    files.setEventSink([&](const juce::var& e) { events.push_back(e); });
+
+    std::vector<uint8_t> payload(250000);
+    for (size_t i = 0; i < payload.size(); i++) payload[i] = static_cast<uint8_t>((i * 29) ^ (i >> 5));
+    auto save = [&](int id, const juce::String& name, const std::vector<uint8_t>& bytes) {
+      files.handleMessage(message({{"type", "files-save-begin"}, {"id", id}, {"name", name}, {"bytes", static_cast<double>(bytes.size())}}));
+      for (size_t at = 0; at < bytes.size(); at += 96 * 1024) {
+        const size_t n = std::min<size_t>(96 * 1024, bytes.size() - at);
+        files.handleMessage(message({{"type", "files-save-chunk"}, {"id", id}, {"offsetBytes", static_cast<double>(at)},
+                                     {"data", juce::Base64::toBase64(bytes.data() + at, n)}}));
+      }
+      files.handleMessage(message({{"type", "files-save-end"}, {"id", id}}));
+    };
+
+    // Save: the dialog is asked for with the suggested name and the file's extension, then the bytes land on disk.
+    nextChoice = dir.getChildFile("Song.webseq.json");
+    save(1, "Song.webseq.json", payload);
+    CHECK(requests.size() == 1 && requests[0].save && requests[0].suggestedName == "Song.webseq.json" && requests[0].wildcard == "*.json", "save asks for a dialog named after the file (%s)", requests.empty() ? "" : requests[0].wildcard.toRawUTF8());
+    CHECK(events.size() == 1 && events[0]["type"].toString() == "files-save-result" && events[0]["name"].toString() == "Song.webseq.json", "save reports the name it was saved under");
+    juce::MemoryBlock onDisk;
+    nextChoice.loadFileAsData(onDisk);
+    CHECK(onDisk.getSize() == payload.size() && std::memcmp(onDisk.getData(), payload.data(), payload.size()) == 0, "the saved bytes are exact (%d)", static_cast<int>(onDisk.getSize()));
+
+    // The next dialog starts where the last file was.
+    events.clear();
+    nextChoice = juce::File();
+    save(2, "again.json", {1, 2, 3});
+    CHECK(requests.back().startDirectory == dir, "the next dialog opens in the folder last used");
+    CHECK(events.size() == 1 && events[0]["name"].isVoid(), "a cancelled save reports null");
+
+    // Unwritable target: reported as an error, not a crash.
+    events.clear();
+    nextChoice = dir.getChildFile("no-such-folder/x.json");
+    save(3, "x.json", {1});
+    CHECK(events.size() == 1 && events[0]["error"].toString().isNotEmpty(), "a failed write is reported with a message");
+
+    // Open: bytes stream back in chunks, reassemble exactly; the extension filter reaches the dialog.
+    events.clear();
+    nextChoice = dir.getChildFile("Song.webseq.json");
+    files.handleMessage(message({{"type", "files-open"}, {"id", 4}, {"extensions", juce::Array<juce::var>{"json", ".webseq"}}}));
+    CHECK(requests.back().wildcard == "*.json;*.webseq" && !requests.back().save, "open filters by the requested extensions (%s)", requests.back().wildcard.toRawUTF8());
+    std::vector<uint8_t> got;
+    juce::String name;
+    for (auto& e : events) {
+      const juce::String t = e["type"].toString();
+      if (t == "files-open-begin") {
+        name = e["name"].toString();
+        got.assign(static_cast<size_t>(static_cast<double>(e["bytes"])), 0);
+      } else if (t == "files-open-chunk") {
+        juce::MemoryOutputStream out;
+        juce::Base64::convertFromBase64(out, e["data"].toString());
+        std::memcpy(got.data() + static_cast<size_t>(static_cast<double>(e["offsetBytes"])), out.getData(), out.getDataSize());
+      }
+    }
+    CHECK(name == "Song.webseq.json" && got == payload && events.back()["type"].toString() == "files-open-end", "an opened file arrives byte for byte, begin ... end");
+
+    events.clear();
+    nextChoice = juce::File();
+    files.handleMessage(message({{"type", "files-open"}, {"id", 5}}));
+    CHECK(events.size() == 1 && static_cast<bool>(events[0]["cancelled"]), "a cancelled open reports cancelled");
+    CHECK(requests.back().wildcard == "*", "no extensions means any file");
+
+    events.clear();
+    nextChoice = dir.getChildFile("missing.json");
+    files.handleMessage(message({{"type", "files-open"}, {"id", 6}}));
+    CHECK(events.size() == 1 && events[0]["error"].toString().isNotEmpty(), "an unreadable file is reported with a message");
+
+    // One dialog at a time.
+    events.clear();
+    park = true;
+    files.handleMessage(message({{"type", "files-open"}, {"id", 7}}));
+    files.handleMessage(message({{"type", "files-open"}, {"id", 8}}));
+    CHECK(events.size() == 1 && static_cast<int>(events[0]["id"]) == 8 && events[0]["error"].toString().contains("already open"), "a second request while a dialog is open is refused");
+    park = false;
+    nextChoice = juce::File();
+    parked(juce::File());
+    events.clear();
+    files.handleMessage(message({{"type", "files-open"}, {"id", 9}}));
+    CHECK(events.size() == 1 && static_cast<bool>(events[0]["cancelled"]), "and dialogs work again once it closes");
+
+    CHECK(!files.handleMessage(message({{"type", "state-ready"}})), "other messages are not claimed");
+    dir.deleteRecursively();
   }
 
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);
