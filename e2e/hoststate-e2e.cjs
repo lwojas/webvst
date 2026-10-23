@@ -32,7 +32,7 @@ function fakeNative() {
       case "state-ready":
         if (!native.state) { await send({ type: "state-restore-none" }); break; }
         await send({ type: "state-restore-begin", app: native.state.app, format: native.state.format, blobs: Object.entries(native.state.blobs).map(([key, b]) => ({ key, bytes: b.length })) });
-        for (let i = 0; i < native.state.text.length; i += 100000) await send({ type: "state-restore-text", data: native.state.text.slice(i, i + 100000) });
+        { const bytes = Buffer.from(native.state.text, "utf8"); for (let i = 0; i < bytes.length; i += 96 * 1024) await send({ type: "state-restore-text", b64: bytes.subarray(i, i + 96 * 1024).toString("base64") }); }
         for (const [key, b] of Object.entries(native.state.blobs)) for (let at = 0; at < b.length; at += 96 * 1024) await send({ type: "state-restore-blob", key, offsetBytes: at, data: b.subarray(at, at + 96 * 1024).toString("base64") });
         await send({ type: "state-restore-end" });
         break;

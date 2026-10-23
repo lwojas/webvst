@@ -76,8 +76,65 @@ struct Rig {
   }
 };
 
+// What JUCE's WebBrowserComponent::emitEventIfBrowserIsVisible does to an event before handing it to the web view
+// (juce_WebBrowserComponent.cpp, emitEvent): serialise, escape, quote. Measured here because its cost decides how big an
+// event may be.
+static double juceEmitCostMs(const juce::var& event) {
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto asString = juce::JSON::toString(event, true);
+  const auto escaped = asString.replace("\\", "\\\\").replace("'", "\\'");
+  const auto script = "window.__JUCE__.backend.emitByBackend(" + juce::String("webvst").quoted() + ", " + escaped.quoted('\'') + ");";
+  const auto t1 = std::chrono::steady_clock::now();
+  return script.isEmpty() ? -1.0 : std::chrono::duration<double, std::milli>(t1 - t0).count();
+}
+
 int main() {
   juce::ScopedJuceInitialiser_GUI init;
+  {  // A saved project is JSON text, so every event carrying it is dense with quotes and backslashes.
+    juce::String project = "{\"song\":{\"patterns\":[";
+    for (int i = 0; i < 1100; i++) project += "{\"note\":\"C-4\",\"instrument\":0,\"velocity\":127,\"fx\":{\"a\":1}},";
+    project += "{}]}}";
+    for (int chunk : {static_cast<int>(project.length()), 32 * 1024, 16 * 1024, 8 * 1024, 4 * 1024, 2 * 1024}) {
+      double total = 0;
+      int events = 0;
+      for (int at = 0; at < project.length(); at += chunk, events++) {
+        auto* o = new juce::DynamicObject();
+        o->setProperty("type", "state-restore-text");
+        o->setProperty("data", project.substring(at, at + chunk));
+        total += juceEmitCostMs(juce::var(o));
+      }
+      std::printf("info: %d chars of project JSON in %2d event(s) of up to %5d chars: %8.1f ms in JUCE's emit\n", project.length(), events, chunk, total);
+    }
+    {  // The same text as base64 (no quotes, no backslashes: nothing for JUCE's escaping to do), in one event and in 96 KB chunks.
+      const auto utf8 = project.toRawUTF8();
+      const size_t bytes = std::strlen(utf8);
+      for (size_t chunk : {bytes, size_t{96 * 1024}}) {
+        double total = 0;
+        int events = 0;
+        for (size_t at = 0; at < bytes; at += chunk, events++) {
+          auto* o = new juce::DynamicObject();
+          o->setProperty("type", "state-restore-text");
+          o->setProperty("b64", juce::Base64::toBase64(utf8 + at, std::min(chunk, bytes - at)));
+          total += juceEmitCostMs(juce::var(o));
+        }
+        std::printf("info: %zu bytes of project JSON as base64 in %d event(s): %8.1f ms in JUCE's emit\n", bytes, events, total);
+      }
+    }
+    {  // The other direction: the page publishes the project as text chunks (JSON.stringify'd by the page, parsed natively).
+      auto* o = new juce::DynamicObject();
+      o->setProperty("eventId", "webvst");
+      auto* payload = new juce::DynamicObject();
+      payload->setProperty("type", "state-text");
+      payload->setProperty("data", project);
+      o->setProperty("payload", juce::var(payload));
+      const auto text = juce::JSON::toString(juce::var(o), true);
+      const auto t0 = std::chrono::steady_clock::now();
+      juce::var parsed;
+      juce::JSON::parse(text, parsed);
+      const auto t1 = std::chrono::steady_clock::now();
+      std::printf("info: parsing the page's %d-char publish event (%d chars with escapes): %.1f ms\n", project.length(), text.length(), std::chrono::duration<double, std::milli>(t1 - t0).count());
+    }
+  }
   {  // How long the page waits on the message thread when it connects (the engine is built before `ready` is sent).
     using Clock = std::chrono::steady_clock;
     EngineHost host;
@@ -442,7 +499,7 @@ int main() {
       c.setEventSink([&](const juce::var& e) { ev.push_back(e); });
       CHECK(c.restore(still.getData(), still.getSize()), "the surviving snapshot restores");
       c.handleMessage(message({{"type", "state-ready"}}));
-      CHECK(ev.size() >= 3 && ev[1]["type"].toString() == "state-restore-text" && ev[1]["data"].toString() == "{}", "and it is the OLD snapshot, not the refused one");
+      CHECK(ev.size() >= 3 && ev[1]["type"].toString() == "state-restore-text" && ev[1]["b64"].toString() == juce::Base64::toBase64("{}", 2), "and it is the OLD snapshot, not the refused one");
     }
 
     // Host load -> page restore, reassembled exactly as the shim does.
@@ -461,7 +518,9 @@ int main() {
         CHECK(static_cast<int>(e["format"]) == 3 && e["app"].toString() == "webseq", "app and format are carried");
         for (auto& b : *e["blobs"].getArray()) gotBlobs[b["key"].toString()].assign(static_cast<size_t>(static_cast<double>(b["bytes"])), 0);
       } else if (t == "state-restore-text") {
-        gotText += e["data"].toString();
+        juce::MemoryOutputStream decoded;
+        juce::Base64::convertFromBase64(decoded, e["b64"].toString());
+        gotText += decoded.toUTF8();
       } else if (t == "state-restore-blob") {
         juce::MemoryOutputStream out;
         juce::Base64::convertFromBase64(out, e["data"].toString());
@@ -469,6 +528,12 @@ int main() {
       }
     }
     CHECK(gotText == text, "the text round-trips through save, load and restore (%d chars)", gotText.length());
+    {  // JUCE escapes an event's string with String::replace, quadratic in the number of backslashes/quotes: a restore must
+       // never send the project text as a plain string (that took 6 s for 64 K characters in a real host).
+      double worst = 0;
+      for (auto& e : events) worst = std::max(worst, juceEmitCostMs(e));
+      CHECK(worst < 100.0, "no restore event is slow for JUCE's emit to hand to the web view (worst %.1f ms)", worst);
+    }
     CHECK(gotBlobs["1"] == sampleA && gotBlobs["2"] == sampleB, "binary blobs round-trip byte for byte");
 
     // A page already listening is handed a host-loaded state at once.
@@ -480,6 +545,20 @@ int main() {
     events.clear();
     live.restore(saved.getData(), saved.getSize());
     CHECK(!events.empty() && events.back()["type"].toString() == "state-restore-end", "a listening page gets a host-loaded state immediately");
+
+    {  // A realistically large, quote-dense project (what WebTracker saves): restoring it must not stall the message thread.
+      juce::String big = "{\"song\":{\"patterns\":[";
+      for (int i = 0; i < 1100; i++) big += "{\"note\":\"C-4\",\"instrument\":0,\"velocity\":127,\"fx\":{\"a\":1}},";
+      big += "{}]}}";
+      SessionState large("webseq");
+      publish(large, "webseq", big, {{"1", sampleB}}, {"1"});
+      std::vector<juce::var> out;
+      large.setEventSink([&](const juce::var& e) { out.push_back(e); });
+      large.handleMessage(message({{"type", "state-ready"}}));
+      double total = 0;
+      for (auto& e : out) total += juceEmitCostMs(e);
+      CHECK(total < 150.0, "restoring a %d-char project costs JUCE's emit %.0f ms in all (it was 6000 ms as plain strings)", big.length(), total);
+    }
 
     // Refusals: the other app's state, corrupt data, nothing.
     SessionState other("webtracker");

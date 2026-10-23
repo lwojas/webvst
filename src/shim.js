@@ -343,10 +343,11 @@
     if (event.type === 'state-restore-none') {
       answerRestore(null);
     } else if (event.type === 'state-restore-begin') {
-      restoreAssembly = { app: event.app, format: event.format, text: [], blobs: {}, bytes: {} };
+      restoreAssembly = { app: event.app, format: event.format, text: [], blobs: {}, bytes: {} }; // text: Uint8Array chunks (UTF-8)
       for (var i = 0; i < event.blobs.length; i++) restoreAssembly.bytes[event.blobs[i].key] = new Uint8Array(event.blobs[i].bytes);
     } else if (event.type === 'state-restore-text' && restoreAssembly) {
-      restoreAssembly.text.push(event.data);
+      // base64 of UTF-8 bytes, decoded once all chunks are in (a character may straddle a chunk boundary)
+      restoreAssembly.text.push(new Uint8Array(base64ToBuffer(event.b64)));
     } else if (event.type === 'state-restore-blob' && restoreAssembly) {
       var target = restoreAssembly.bytes[event.key];
       if (target) target.set(new Uint8Array(base64ToBuffer(event.data)), event.offsetBytes);
@@ -356,7 +357,17 @@
         blobs[key] = restoreAssembly.bytes[key].buffer;
         committedBlobs.set(key, blobs[key]);
       });
-      var snapshot = { app: restoreAssembly.app, format: restoreAssembly.format, data: restoreAssembly.text.join(''), blobs: blobs };
+      var total = 0;
+      restoreAssembly.text.forEach(function (part) {
+        total += part.length;
+      });
+      var textBytes = new Uint8Array(total);
+      var at = 0;
+      restoreAssembly.text.forEach(function (part) {
+        textBytes.set(part, at);
+        at += part.length;
+      });
+      var snapshot = { app: restoreAssembly.app, format: restoreAssembly.format, data: new TextDecoder().decode(textBytes), blobs: blobs };
       restoreAssembly = null;
       answerRestore(snapshot);
     }

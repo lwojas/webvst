@@ -183,8 +183,10 @@ test("host state: onRestore asks once, reassembles the restore, serves late subs
 
   const blobA = Buffer.from(Array.from({ length: 150000 }, (_, n) => (n * 7) % 256));
   native({ type: "state-restore-begin", app: "webtracker", format: 2, blobs: [{ key: "a", bytes: blobA.length }] });
-  native({ type: "state-restore-text", data: '{"song":' });
-  native({ type: "state-restore-text", data: '"x"}' });
+  // Text arrives as base64 of its UTF-8 bytes; a multi-byte character may straddle two chunks.
+  const text = Buffer.from('{"song":"x \u00e9\u{1F3B5}"}', "utf8");
+  native({ type: "state-restore-text", b64: text.subarray(0, 14).toString("base64") }); // splits inside a character
+  native({ type: "state-restore-text", b64: text.subarray(14).toString("base64") });
   for (let at = 0; at < blobA.length; at += 96 * 1024) {
     native({ type: "state-restore-blob", key: "a", offsetBytes: at, data: blobA.subarray(at, at + 96 * 1024).toString("base64") });
   }
@@ -193,7 +195,7 @@ test("host state: onRestore asks once, reassembles the restore, serves late subs
   assert.equal(first.length, 1);
   assert.equal(first[0].app, "webtracker");
   assert.equal(first[0].format, 2);
-  assert.equal(first[0].data, '{"song":"x"}');
+  assert.equal(first[0].data, '{"song":"x \u00e9\u{1F3B5}"}', "UTF-8 text survives a split inside a character");
   assert.deepEqual(Buffer.from(first[0].blobs.a), blobA);
 
   const late = [];
@@ -202,7 +204,7 @@ test("host state: onRestore asks once, reassembles the restore, serves late subs
 
   off();
   native({ type: "state-restore-begin", app: "webtracker", format: 2, blobs: [] });
-  native({ type: "state-restore-text", data: "{}" });
+  native({ type: "state-restore-text", b64: Buffer.from("{}").toString("base64") });
   native({ type: "state-restore-end" });
   assert.equal(first.length, 1, "unsubscribed");
   assert.equal(late.length, 2);
