@@ -30,22 +30,27 @@ WebVstEditor::WebVstEditor(WebVstProcessor& p) : AudioProcessorEditor(&p), proce
                      .withUserScript(juce::String::createStringFromData(BinaryData::shim_js, BinaryData::shim_jsSize))
                      .withEventListener("webvst", [this](const juce::var& message) {
                        pageReady_ = true;  // the shim only speaks once the page has loaded
-                       processor_.engineHost().handleMessage(message);
+                       if (!processor_.sessionState().handleMessage(message)) processor_.engineHost().handleMessage(message);
                      });
 
   web_ = std::make_unique<Web>(options, [this] { pageReady_ = false; });
   addAndMakeVisible(*web_);
 
-  processor_.engineHost().setEventSink([this](const juce::var& event) {
+  auto emit = [this](const juce::var& event) {
     if (pageReady_ && web_) web_->emitEventIfBrowserIsVisible("webvst", event);
-  });
+  };
+  processor_.engineHost().setEventSink(emit);
+  processor_.sessionState().setEventSink(emit);
 
   web_->goToURL(resolveUrl());
   setResizable(true, true);
   setSize(1100, 700);
 }
 
-WebVstEditor::~WebVstEditor() { processor_.engineHost().setEventSink(nullptr); }
+WebVstEditor::~WebVstEditor() {
+  processor_.engineHost().setEventSink(nullptr);
+  processor_.sessionState().setEventSink(nullptr);
+}
 
 void WebVstEditor::resized() {
   if (web_) web_->setBounds(getLocalBounds());
