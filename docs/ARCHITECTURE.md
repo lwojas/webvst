@@ -80,6 +80,11 @@ node --test test/                                  # the shim against the real w
   its plugin (WebSeq opens `http://localhost:5174`, WebTracker `http://localhost:5175`; `WEBVST_URL_WEBSEQ` /
   `WEBVST_URL_WEBTRACKER` in the host's environment override one plugin, `WEBVST_URL` any plugin without its own). Restart the dev
   server after changing the `webdsp` dependency (Vite caches it).
+- **Ableton Live does not list the plugin, though REAPER does?** Look in `~/Library/Preferences/Ableton/Live <version>/PluginScanner.txt`
+  for the bundle's name. `Failed to load plugin: a sealed resource is missing or invalid` is a broken code signature: JUCE adds
+  `Contents/Resources/moduleinfo.json` after signing, so the build re-signs the finished bundle as its last step
+  (`CMakeLists.txt`, `webvst_add_plugin`; CI verifies it). Check a bundle with `codesign -vv --strict <bundle>`; it must say
+  "valid on disk". REAPER does not check the seal, so a broken signature only shows up in Ableton.
 - **Rebuilt the plugin and the DAW still behaves the old way?** The DAW caches plugins: replace the bundle in
   `~/Library/Audio/Plug-Ins/VST3/` with the host closed, then rescan.
 - **Bump webdsp:** `git -C third_party/webdsp fetch && git -C third_party/webdsp checkout <sha> && git add third_party/webdsp`,
@@ -99,5 +104,5 @@ node --test test/                                  # the shim against the real w
 - Live MIDI notes go DAW → native → page → engine (≈10–30 ms + a block); native note routing is planned.
 - No hardware MIDI controllers in a macOS plugin WebView (WKWebView has no Web MIDI); no MIDI output; SysEx not forwarded.
 - Release packaging is not done: the plugin loads its client by URL. Planned for release: a versioned snapshot of each
-  client's `dist/` shipped next to the plugin (a packaging step here only), signing and notarization, installer, Windows
+  client's `dist/` shipped next to the plugin (a packaging step here only), a Developer ID signature and notarization (builds are ad-hoc signed, enough to load locally), installer, Windows
   (WebView2 options, real-port MIDI) untested. Licence TBA (JUCE is AGPL or commercial).
