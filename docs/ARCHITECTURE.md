@@ -40,6 +40,19 @@ how those repos build.
 | `src/PluginProcessor.*`, `src/PluginEditor.*` | JUCE plumbing. The editor is a `WebBrowserComponent` loading the plugin's URL (per-app default, env overrides), routing page messages to `SessionState` / `HostFiles` / `EngineHost`. |
 | `CMakeLists.txt` | `webvst_add_plugin(...)`: one plugin per client from the same sources (WebSeq, WebTracker); each has its own plugin ID, app stamp and default URL. |
 
+## MIDI: two paths, one rule
+
+- **Delivery to the page.** Every channel message is posted to the page (a virtual Web MIDI input), with its engine time. The page uses it for
+  note entry, CCs, learn.
+- **Playing, natively (`set-midi-route`).** The page declares what a key plays (a sample or an instrument, with unity note, chop, loop, mono,
+  hold-until-key-up, gain, choke group, channel). `EngineHost` then plays incoming notes **itself**: it renders the block in segments split at each
+  MIDI event and makes immediate engine calls between them, so a note starts on its own sample and a note-off can never overtake its note-on (a
+  scheduled note-on plus an immediate note-off would). No WebView in the path (about 10-30 ms plus a block saved) and it keeps playing with the
+  window closed. The router's voice ids start at 2^30 and are never reported to the page; the route belongs to the engine it was declared for, so a page
+  reload drops it and the page declares it again. Allocation-free (counted in the host test).
+- **The rule that avoids double notes:** the page plays notes itself only when `capabilities.midiRouting` is false. A plugin reports it true
+  (`ready.midiRouting`), so the clients declare a route and do not audition MIDI notes from the page.
+
 ## What crosses the bridge (the `"webvst"` event channel)
 
 | Direction | Messages | Contract |
@@ -47,7 +60,8 @@ how those repos build.
 | page → plugin | every `HostCommand` (`trigger`, `schedule`, `create-instrument`, ...), plus `__init`, `sample-begin/chunk/end` (the shim splits `load-sample`) | webdsp `src/runtime/commandProtocol.ts`; `EngineHost::handledMessageTypes()` |
 | plugin → page | every `WorkletEvent` (`ready`, `meters`, `voice-ended`, `capture-complete`, ...), `error` | same; `ready.protocolVersion` |
 | plugin → page | `host-transport` (mapping of the DAW's beat to engine time, tempo, loop, epoch) | webdsp `docs/host-transport.md` |
-| plugin → page | `midi` (channel messages with engine times) | surfaced as a Web MIDI input |
+| plugin → page | `midi` (channel messages with engine times) | surfaced as a Web MIDI input (for note entry, CCs, learn) |
+| page → plugin | `set-midi-route` (what a key plays) | webdsp `docs/midi-routing.md`; the plugin plays notes itself, see below |
 | both | `state-*` | `SessionState.h`; webdsp `docs/host-state.md` |
 | both | `files-*` | `HostFiles.h`; webdsp `docs/host-files.md` |
 
@@ -116,7 +130,7 @@ node --test test/                                  # the shim against the real w
 
 - The page's JS sequencer is the timing authority: closing the editor stops playback, tempo changes restart the schedule,
   offline bounce is unsupported. Fix: a beat-domain event list pushed to native (WebView stays UI-only).
-- Live MIDI notes go DAW → native → page → engine (≈10–30 ms + a block); native note routing is planned.
+- MIDI routing covers notes (and all-notes-off); pitch bend, CCs and sustain still go to the page only.
 - No hardware MIDI controllers in a macOS plugin WebView (WKWebView has no Web MIDI); no MIDI output; SysEx not forwarded.
 - Release packaging is not done: the plugin loads its client by URL. Planned for release: a versioned snapshot of each
   client's `dist/` shipped next to the plugin (a packaging step here only), a Developer ID signature and notarization (builds are ad-hoc signed, enough to load locally), installer, Windows
