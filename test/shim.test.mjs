@@ -17,7 +17,8 @@ const listeners = {};
 const native = (event) => listeners.webvst(event);
 const READY = {
   type: "ready",
-  protocolVersion: 1,
+  protocolVersion: 2,
+  midiRouting: true,
   sampleRate: 48000,
   outputChannels: 2,
   maxVoices: 64,
@@ -50,7 +51,8 @@ test("the shim marks the page as an embedded host", () => {
 
 test("AudioRuntime creates itself through the fakes and reports the host's capabilities", () => {
   assert.equal(runtime.getCapabilities().sampleRate, 48000);
-  assert.equal(runtime.getCapabilities().hostProtocolVersion, 1);
+  assert.equal(runtime.getCapabilities().hostProtocolVersion, 2);
+  assert.equal(runtime.getCapabilities().midiRouting, true);
   const init = sent.find((m) => m.type === "__init");
   assert.equal(init.maxVoices, 128);
 });
@@ -284,6 +286,22 @@ test("host files: openFile asks with the extensions, reassembles the chunks, and
   const failing = files.openFile();
   native({ type: "files-open-result", id: sent.find((m) => m.type === "files-open").id, error: "could not read /x" });
   await assert.rejects(failing, /could not read/);
+});
+
+test("MIDI routing: setMidiRoute sends a cleaned route for a known target, null for an unknown one, and null clears", () => {
+  const id = runtime.createInstrument(0, {});
+  sent.length = 0;
+  runtime.setMidiRoute({ kind: "instrument", id, unityNote: 60.4, holdUntilKeyUp: true, gain: 4, bus: 9, chop: true });
+  const route = sent.find((m) => m.type === "set-midi-route").route;
+  assert.deepEqual(route, { kind: "instrument", id, unityNote: 60, holdUntilKeyUp: true, gain: 1 }, "rounded, clamped, sample-only fields dropped");
+
+  sent.length = 0;
+  runtime.setMidiRoute({ kind: "sample", id: 999, unityNote: 60 }); // no such sample
+  assert.equal(sent.find((m) => m.type === "set-midi-route").route, null);
+
+  sent.length = 0;
+  runtime.setMidiRoute(null);
+  assert.equal(sent.find((m) => m.type === "set-midi-route").route, null);
 });
 
 test("samples are sent in chunks and reassemble to the same bytes", () => {

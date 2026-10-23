@@ -33,7 +33,7 @@ class EngineHost : private juce::Timer {
 
   // The webdsp command/event protocol version this host implements (webdsp/src/runtime/commandProtocol.ts,
   // HOST_PROTOCOL_VERSION). Reported in the ready event so a newer web app can notice an older plugin.
-  static constexpr int kProtocolVersion = 1;
+  static constexpr int kProtocolVersion = 2;  // 2: set-midi-route / ready.midiRouting
 
   // Every message type handleMessage understands: the HostCommand types plus the shim's own sample-transfer
   // messages. Tests check that it covers webdsp's HostCommand union.
@@ -77,7 +77,7 @@ class EngineHost : private juce::Timer {
     SwapEngine, LoadSample, RemoveSample, Trigger, ScheduleEvent, Release, Stop, VoiceParam, BusParam,
     FxAdd, FxRemove, FxMove, FxEnabled, FxParam, FxLfo, InstCreate, InstRemove, InstNoteOn, InstNoteOff,
     InstParam, InstLfo, Transport, ClearRegions, AddRegion, SampleParam, ScheduleParam, CancelScheduled,
-    StartCapture, StopCapture, ArmCapture, ConfigureVoices
+    StartCapture, StopCapture, ArmCapture, ConfigureVoices, SetMidiRoute
   };
 
   // Field use per type is documented where the message thread fills it (EngineHost.cpp, handleMessage).
@@ -137,6 +137,9 @@ class EngineHost : private juce::Timer {
   juce::var buildReady(int maxVoices);
   void applyCmd(const Cmd& c, int64_t blockStart);
   void forwardMidi(const juce::MidiBuffer& midi, int64_t blockStart);
+  void renderFrames(juce::AudioBuffer<float>& buffer, int from, int count, int64_t blockStart, int outChannels);
+  void applyRoutedMidi(const uint8_t* data, int size);
+  void releaseRouted();
   void trackTransport(const HostTimeInfo& host, int64_t blockStart, int numFrames);
   void readCapture(int32_t captureId, int32_t resultSampleId);
   void postEvt(const Evt& e);
@@ -153,6 +156,21 @@ class EngineHost : private juce::Timer {
 
   std::function<void(const juce::var&)> sink_;
   std::unordered_map<int32_t, SamplePayload*> loading_;  // message thread: samples being received
+
+  // audio thread state: MIDI routing (webdsp docs/midi-routing.md). The page declares what a key plays; incoming notes are
+  // played here, between engine render segments split at each MIDI event, so they are sample-accurate and in order.
+  struct Route {
+    bool active = false;
+    bool instrument = false;  // else a sample
+    int32_t id = 0, unityNote = 60, bus = 0, chokeGroup = 0, channel = -1;
+    bool chop = false, loop = false, mono = false, hold = false;
+    float gain = 1.0f;
+  } route_;
+  static constexpr int32_t kRouteVoiceBase = 1 << 30;  // voice ids from here up are the router's, never the page's
+  int32_t nextRouteVoice_ = kRouteVoiceBase;
+  int32_t heldVoice_[128] = {};  // sample voice per MIDI note, while held (hold routes)
+  int32_t monoVoice_ = 0;        // the last voice of a mono route
+  int32_t lastInstrumentNote_ = -1;
 
   // audio thread state: host transport tracking
   bool lastPlaying_ = false, lastLoopOn_ = false;

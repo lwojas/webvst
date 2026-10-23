@@ -1,6 +1,7 @@
 #include "EngineHost.h"
 #include "Trace.h"
 #include <cmath>
+#include <limits>
 #include <cstdlib>
 
 namespace {
@@ -102,7 +103,7 @@ const std::vector<juce::String>& EngineHost::handledMessageTypes() {
       "set-effect-param", "set-effect-lfo", "set-instrument-lfo", "create-instrument", "remove-instrument",
       "instrument-note-on", "instrument-note-off", "set-instrument-param", "set-transport", "set-sample-regions",
       "set-sample-param", "schedule-params", "cancel-scheduled", "start-capture", "stop-capture", "arm-capture",
-      "configure"};
+      "configure", "set-midi-route"};
   return types;
 }
 
@@ -188,6 +189,7 @@ juce::var EngineHost::buildReady(int maxVoices) {
   }
   return object({{"type", "ready"},
                  {"protocolVersion", kProtocolVersion},
+                 {"midiRouting", true},
                  {"sampleRate", sampleRate_},
                  {"outputChannels", kOutputChannels},
                  {"maxVoices", maxVoices},
@@ -447,6 +449,24 @@ void EngineHost::handleMessage(const juce::var& msg) {
     c.d[0] = static_cast<double>(toFrame(num(msg, "startTime", 0)));
     c.d[1] = static_cast<double>(toFrame(num(msg, "stopTime", 0)));
     pushCmd(c);
+  } else if (type == "set-midi-route") {
+    c.type = CmdType::SetMidiRoute;
+    const juce::var r = msg["route"];
+    c.i[0] = r.isObject() ? 1 : 0;
+    if (c.i[0]) {
+      c.i[1] = r["kind"].toString() == "instrument" ? 1 : 0;
+      c.i[2] = integer(r, "id", 0);
+      c.i[3] = juce::jlimit(0, 127, integer(r, "unityNote", 60));
+      c.i[4] = integer(r, "bus", 0);
+      c.i[5] = flag(r, "chop");
+      c.i[6] = flag(r, "loop");
+      c.i[7] = flag(r, "mono");
+      c.i[8] = flag(r, "holdUntilKeyUp");
+      c.i[9] = juce::jmax(0, integer(r, "chokeGroup", 0));
+      c.i[10] = has(r, "channel") ? juce::jlimit(0, 15, integer(r, "channel", 0)) : -1;
+      c.f[0] = static_cast<float>(juce::jlimit(0.0, 1.0, num(r, "gain", 1.0)));
+    }
+    pushCmd(c);
   } else if (type == "configure") {
     c.type = CmdType::ConfigureVoices;
     c.i[0] = integer(msg, "maxVoices", kDefaultMaxVoices);
@@ -472,6 +492,10 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     dispose.p = engine_.release();
     engine_.reset(static_cast<webdsp::Engine*>(c.p));
     armedCaptures_.clear();
+    route_ = Route{};  // its ids belonged to the old engine; the page declares it again
+    std::fill(std::begin(heldVoice_), std::end(heldVoice_), 0);
+    monoVoice_ = 0;
+    lastInstrumentNote_ = -1;
     if (dispose.p) postEvt(dispose);
     return;
   }
@@ -557,6 +581,23 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
       else error(kErrArmCapture, c.i[0], 0);
       break;
     case CmdType::ConfigureVoices: e.reconfigureVoices(c.i[0]); break;
+    case CmdType::SetMidiRoute: {
+      releaseRouted();  // keys held under the old route must not be left sounding
+      route_ = Route{};
+      route_.active = c.i[0] != 0;
+      route_.instrument = c.i[1] != 0;
+      route_.id = c.i[2];
+      route_.unityNote = c.i[3];
+      route_.bus = c.i[4];
+      route_.chop = c.i[5] != 0;
+      route_.loop = c.i[6] != 0;
+      route_.mono = c.i[7] != 0;
+      route_.hold = c.i[8] != 0;
+      route_.chokeGroup = c.i[9];
+      route_.channel = c.i[10];
+      route_.gain = c.f[0];
+      break;
+    }
     default: break;
   }
 }
@@ -657,6 +698,96 @@ void EngineHost::readCapture(int32_t captureId, int32_t resultSampleId) {
   engine_->discardCapture(captureId);
 }
 
+// Renders `count` frames starting `from` frames into the block, in engine-sized chunks, collecting what the engine reports.
+void EngineHost::renderFrames(juce::AudioBuffer<float>& buffer, int from, int count, int64_t blockStart, int outChannels) {
+  for (int done = 0; done < count;) {
+    const int chunk = juce::jmin(webdsp::kMaxRenderQuantum, count - done);
+    const int at = from + done;
+    engine_->process(blockStart + at, chunk);
+    for (int ch = 0; ch < outChannels; ch++)
+      std::memcpy(buffer.getWritePointer(ch) + at, engine_->outputChannel(ch), sizeof(float) * static_cast<size_t>(chunk));
+
+    for (const int32_t voice : engine_->endedVoices()) {
+      if (voice >= kRouteVoiceBase) continue;  // the router's own voices: the page never knew them
+      Evt ev;
+      ev.type = EvtType::VoiceEnded;
+      ev.a = voice;
+      postEvt(ev);
+    }
+    for (const int32_t id : engine_->finishedCaptures()) {
+      auto it = armedCaptures_.find(id);
+      if (it == armedCaptures_.end()) continue;
+      const int32_t resultId = it->second;
+      armedCaptures_.erase(it);
+      readCapture(id, resultId);
+    }
+    done += chunk;
+  }
+}
+
+// Plays one incoming MIDI message from the declared route: note-on starts the target (immediately: the caller has rendered up to
+// this event), note-off ends a held one, all-notes-off ends everything held. Allocation-free.
+void EngineHost::applyRoutedMidi(const uint8_t* data, int size) {
+  if (!engine_ || size < 1 || size > 3) return;
+  const int status = data[0] & 0xF0;
+  if (route_.channel >= 0 && status >= 0x80 && status < 0xF0 && (data[0] & 0x0F) != route_.channel) return;
+  const int note = size > 1 ? data[1] & 0x7F : 0;
+  const int velocity = size > 2 ? data[2] & 0x7F : 0;
+
+  if (status == 0xB0 && (note == 123 || note == 120)) {  // all notes off / all sound off
+    releaseRouted();
+    return;
+  }
+  const bool on = status == 0x90 && velocity > 0;
+  const bool off = status == 0x80 || (status == 0x90 && velocity == 0);
+
+  if (on) {
+    const float level = static_cast<float>(velocity) / 127.0f * route_.gain;
+    const int32_t pitch = note - route_.unityNote;
+    if (route_.instrument) {
+      engine_->instrumentNoteOn(route_.id, level, 0.0f, static_cast<float>(pitch), -1, route_.chokeGroup);
+      lastInstrumentNote_ = note;
+      return;
+    }
+    int32_t region = -1;
+    float rate = std::exp2(static_cast<float>(pitch) / 12.0f);
+    if (route_.chop) {
+      if (pitch < 0) return;  // below the first slice
+      region = pitch;
+      rate = 1.0f;  // a slice never transposes
+    }
+    if (route_.mono && monoVoice_ != 0) engine_->release(monoVoice_);
+    if (heldVoice_[note] != 0) engine_->release(heldVoice_[note]);
+    const int32_t voice = nextRouteVoice_;
+    nextRouteVoice_ = nextRouteVoice_ >= std::numeric_limits<int32_t>::max() - 1 ? kRouteVoiceBase : nextRouteVoice_ + 1;
+    engine_->trigger(voice, route_.id, route_.bus, level, rate, 0, -1, route_.loop, false, -1, 0.0f, region, route_.chokeGroup);
+    if (route_.mono) monoVoice_ = voice;
+    heldVoice_[note] = route_.hold ? voice : 0;
+  } else if (off && route_.hold) {
+    if (route_.instrument) {
+      if (lastInstrumentNote_ == note) {  // a synth is monophonic: an older key's release must not cut the newer note
+        engine_->instrumentNoteOff(route_.id);
+        lastInstrumentNote_ = -1;
+      }
+    } else if (heldVoice_[note] != 0) {
+      engine_->release(heldVoice_[note]);
+      heldVoice_[note] = 0;
+    }
+  }
+}
+
+// Ends everything the router is holding (the route changed, or all-notes-off).
+void EngineHost::releaseRouted() {
+  if (!engine_) return;
+  for (int note = 0; note < 128; note++) {
+    if (heldVoice_[note] != 0) engine_->release(heldVoice_[note]);
+    heldVoice_[note] = 0;
+  }
+  if (route_.active && route_.instrument && route_.hold && lastInstrumentNote_ >= 0) engine_->instrumentNoteOff(route_.id);
+  lastInstrumentNote_ = -1;
+  monoVoice_ = 0;
+}
+
 void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host, const juce::MidiBuffer& midi) {
   const int numFrames = buffer.getNumSamples();
   const int64_t blockStart = frame_.load(std::memory_order_relaxed);
@@ -669,27 +800,20 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
   buffer.clear();
   if (engine_) {
     const int outChannels = juce::jmin(buffer.getNumChannels(), engine_->outputChannels());
-    for (int done = 0; done < numFrames;) {
-      const int chunk = juce::jmin(webdsp::kMaxRenderQuantum, numFrames - done);
-      engine_->process(blockStart + done, chunk);
-      for (int ch = 0; ch < outChannels; ch++)
-        std::memcpy(buffer.getWritePointer(ch) + done, engine_->outputChannel(ch), sizeof(float) * static_cast<size_t>(chunk));
-
-      for (const int32_t voice : engine_->endedVoices()) {
-        Evt ev;
-        ev.type = EvtType::VoiceEnded;
-        ev.a = voice;
-        postEvt(ev);
+    int done = 0;
+    if (route_.active) {
+      // Render up to each MIDI event, then play it (immediate calls take effect at the start of the next render), so a note
+      // lands on its own sample and a note-off can never overtake its note-on.
+      for (const auto metadata : midi) {
+        const int at = juce::jlimit(0, numFrames, metadata.samplePosition);
+        if (at > done) {
+          renderFrames(buffer, done, at - done, blockStart, outChannels);
+          done = at;
+        }
+        applyRoutedMidi(metadata.data, metadata.numBytes);
       }
-      for (const int32_t id : engine_->finishedCaptures()) {
-        auto it = armedCaptures_.find(id);
-        if (it == armedCaptures_.end()) continue;
-        const int32_t resultId = it->second;
-        armedCaptures_.erase(it);
-        readCapture(id, resultId);
-      }
-      done += chunk;
     }
+    renderFrames(buffer, done, numFrames - done, blockStart, outChannels);
 
     framesSinceMeters_ += numFrames;
     if (framesSinceMeters_ >= kMetersIntervalFrames) {
