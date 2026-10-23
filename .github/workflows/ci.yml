@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * *" # nightly: also build against webdsp main, to catch drift early
+  workflow_dispatch:
+
+jobs:
+  pinned:
+    name: Build and test against the pinned webdsp
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Shim tests
+        run: node --test test/
+      - name: Configure
+        run: cmake -B build -DWEBVST_BUILD_TESTS=ON
+      - name: Host test (engine host, protocol parity, MIDI, transport, allocation counts)
+        run: |
+          cmake --build build --target WebVstHostTest -j 4
+          find build -name WebVstHostTest -type f -exec {} \;
+      - name: Plugin
+        run: cmake --build build --target WebVST_VST3 -j 4
+
+  webdsp-main:
+    name: Build and test against webdsp main (drift check)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: lwojas/webdsp
+          ref: main
+          path: webdsp-main
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Shim tests
+        run: node --test test/
+        env:
+          WEBVST_WEBDSP_DIR: ${{ github.workspace }}/webdsp-main
+      - name: Host test
+        run: |
+          cmake -B build -DWEBVST_BUILD_TESTS=ON -DWEBVST_WEBDSP_DIR=${{ github.workspace }}/webdsp-main
+          cmake --build build --target WebVstHostTest -j 4
+          find build -name WebVstHostTest -type f -exec {} \;

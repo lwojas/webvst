@@ -1,0 +1,3 @@
+[submodule "third_party/webdsp"]
+	path = third_party/webdsp
+	url = https://github.com/lwojas/webdsp.git

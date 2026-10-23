@@ -5,7 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # webdsp is consumed as a header-only engine (native/src/engine.h). Nothing in webdsp's own build is used.
-set(WEBVST_WEBDSP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../webdsp" CACHE PATH "Path to a webdsp checkout")
+# It is pinned as a git submodule (third_party/webdsp): bumping webdsp is an explicit commit here. To build against
+# a working copy instead (e.g. while developing webdsp), pass -DWEBVST_WEBDSP_DIR=../webdsp.
+set(WEBVST_WEBDSP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/webdsp" CACHE PATH "Path to a webdsp checkout")
+if(NOT EXISTS "${WEBVST_WEBDSP_DIR}/native/src/engine.h")
+  message(FATAL_ERROR "webdsp not found at ${WEBVST_WEBDSP_DIR}. Run: git submodule update --init   (or pass -DWEBVST_WEBDSP_DIR=<path to a webdsp checkout>)")
+endif()
 
 include(FetchContent)
 FetchContent_Declare(JUCE
@@ -53,7 +58,7 @@ if(WEBVST_BUILD_TESTS)
   juce_add_console_app(WebVstHostTest PRODUCT_NAME "WebVstHostTest")
   target_sources(WebVstHostTest PRIVATE test/engine_host_test.cpp src/EngineHost.cpp)
   target_include_directories(WebVstHostTest PRIVATE src)
-  target_compile_definitions(WebVstHostTest PRIVATE WEBVST_WEBDSP_DIR_STR="${WEBVST_WEBDSP_DIR}")
+  target_compile_definitions(WebVstHostTest PRIVATE WEBVST_WEBDSP_DIR_STR="${WEBVST_WEBDSP_DIR}" WEBVST_SHIM_PATH_STR="${CMAKE_CURRENT_SOURCE_DIR}/src/shim.js")
   target_include_directories(WebVstHostTest SYSTEM PRIVATE "${WEBVST_WEBDSP_DIR}/native/src")
   target_link_libraries(WebVstHostTest PRIVATE
     juce::juce_core juce::juce_events juce::juce_audio_basics

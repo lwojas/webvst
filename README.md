@@ -22,8 +22,15 @@ Host transport and DAW MIDI reach the page; DAW state (saving the project in the
 
 ## Build (macOS)
 
-    cmake -B build -DWEBVST_WEBDSP_DIR=../webdsp
+    git clone --recurse-submodules https://github.com/lwojas/webvst.git    # or: git submodule update --init
+    cmake -B build
     cmake --build build --target WebVST_VST3
+
+webdsp is pinned as a submodule (`third_party/webdsp`); this repo is a built target that pulls webdsp and
+the web clients rather than owning them. Bump webdsp with
+`git -C third_party/webdsp fetch && git -C third_party/webdsp checkout <sha> && git add third_party/webdsp`, then run the
+tests. To build against a working copy, pass `-DWEBVST_WEBDSP_DIR=../webdsp`. Webdsp's protocol is additive
+(`docs/native-host.md` there); the host test fails if the plugin stops handling a webdsp command.
 
 The bundle lands under `build/WebVST_artefacts/`. Copy it to `~/Library/Audio/Plug-Ins/VST3/` to load it in a host.
 
@@ -41,6 +48,7 @@ The bundle lands under `build/WebVST_artefacts/`. Copy it to `~/Library/Audio/Pl
 
     cmake -B build -DWEBVST_BUILD_TESTS=ON
     cmake --build build --target WebVstHostTest && find build -name WebVstHostTest -type f -exec {} \;
+    node --test test/        # the page shim against the real webdsp runtime, no browser
 
 Headless: drives EngineHost with the page's JSON, checks audio, scheduling accuracy, and counts audio-thread
 allocations per command type.

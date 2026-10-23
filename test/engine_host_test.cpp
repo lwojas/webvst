@@ -327,8 +327,8 @@ int main() {
       }
     }
     CHECK(missing == 0, "the plugin handles every HostCommand type in webdsp (%d missing)", missing);
-    const juce::String shim = juce::File(WEBVST_WEBDSP_DIR_STR).getParentDirectory().getChildFile("webvst/src/shim.js").loadFileAsString();
-    CHECK(shim.isEmpty() || shim.contains("load-sample"), "the shim translates load-sample");
+    const juce::String shim = juce::File(WEBVST_SHIM_PATH_STR).loadFileAsString();
+    CHECK(shim.contains("load-sample"), "the shim translates load-sample");
 
     // And the list is true: sending a bare message of each type is not reported as unknown.
     {

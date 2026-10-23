@@ -1,7 +1,7 @@
 // Tests the page shim (src/shim.js) against a faked native backend, driving the REAL webdsp AudioRuntime
 // through it: the runtime must be able to create itself, send commands, receive events and a clock, and see the
 // host transport and the virtual MIDI input, with no browser. Run: node --test test/
-// (webdsp is read from $WEBVST_WEBDSP_DIR, default ../webdsp, which must have lib/ built.)
+// (webdsp is read from $WEBVST_WEBDSP_DIR, default the pinned third_party/webdsp; its committed lib/ is used.)
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
@@ -9,7 +9,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const webdsp = path.resolve(process.env.WEBVST_WEBDSP_DIR ?? path.join(here, "../../webdsp"));
+const webdsp = path.resolve(process.env.WEBVST_WEBDSP_DIR ?? path.join(here, "../third_party/webdsp"));
 
 // ---- fake JUCE backend -----------------------------------------------------------------------------------
 const sent = [];
