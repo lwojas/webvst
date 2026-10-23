@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include <BinaryData.h>
+#include "Trace.h"
 
 namespace {
 // Each plugin's own default (WEBVST_DEFAULT_URL, set per target in CMakeLists.txt): its client's `npm run dev`.
@@ -11,10 +12,12 @@ constexpr const char* kDefaultUrl = WEBVST_DEFAULT_URL;
 class WebVstEditor::Web : public juce::WebBrowserComponent {
  public:
   Web(const Options& options, std::function<void()> onNavigate) : WebBrowserComponent(options), onNavigate_(std::move(onNavigate)) {}
-  bool pageAboutToLoad(const juce::String&) override {
+  bool pageAboutToLoad(const juce::String& url) override {
+    Trace::log("native: page about to load " + url);
     if (onNavigate_) onNavigate_();
     return true;
   }
+  void pageFinishedLoading(const juce::String& url) override { Trace::log("native: page finished loading " + url); }
 
  private:
   std::function<void()> onNavigate_;
@@ -30,10 +33,17 @@ juce::String WebVstEditor::resolveUrl() {
 }
 
 WebVstEditor::WebVstEditor(WebVstProcessor& p) : AudioProcessorEditor(&p), processor_(p) {
+  Trace::log("native: editor created");
   auto options = juce::WebBrowserComponent::Options{}
                      .withNativeIntegrationEnabled()
+                     .withInitialisationData("trace", Trace::enabled())
                      .withUserScript(juce::String::createStringFromData(BinaryData::shim_js, BinaryData::shim_jsSize))
                      .withEventListener("webvst", [this](const juce::var& message) {
+                       if (message["type"].toString() == "__trace") {  // the page's own marks, on the native clock
+                         Trace::log("page:   " + message["mark"].toString() + " (page clock " + juce::String(static_cast<double>(message["t"]), 0) + " ms)");
+                         return;
+                       }
+                       if (!pageReady_) Trace::log("native: first message from the page: " + message["type"].toString());
                        pageReady_ = true;  // the shim only speaks once the page has loaded
                        if (processor_.sessionState().handleMessage(message) || processor_.hostFiles().handleMessage(message)) return;
                        processor_.engineHost().handleMessage(message);
@@ -49,6 +59,7 @@ WebVstEditor::WebVstEditor(WebVstProcessor& p) : AudioProcessorEditor(&p), proce
   processor_.sessionState().setEventSink(emit);
   processor_.hostFiles().setEventSink(emit);
 
+  Trace::log("native: loading " + resolveUrl());
   web_->goToURL(resolveUrl());
   setResizable(true, true);
   setSize(1100, 700);
