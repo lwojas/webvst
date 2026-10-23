@@ -3,7 +3,20 @@
 
 WebVstProcessor::WebVstProcessor()
     : AudioProcessor(BusesProperties().withOutput("Output", juce::AudioChannelSet::stereo(), true)),
-      sessionState_(juce::String(WEBVST_APP_ID)) {}
+      sessionState_(juce::String(WEBVST_APP_ID)),
+      hostFiles_([this](const HostFiles::ChooserRequest& request, std::function<void(juce::File)> done) {
+        // The host's own dialog, native to the platform; released after its callback has returned.
+        const auto flags = request.save ? juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles |
+                                              juce::FileBrowserComponent::warnAboutOverwriting
+                                        : juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
+        const juce::File start = request.save ? request.startDirectory.getChildFile(request.suggestedName) : request.startDirectory;
+        fileChooser_ = std::make_unique<juce::FileChooser>(request.title, start, request.wildcard);
+        fileChooser_->launchAsync(flags, [this, done = std::move(done)](const juce::FileChooser& chooser) {
+          const juce::File chosen = chooser.getResult();
+          juce::MessageManager::callAsync([this] { fileChooser_.reset(); });
+          done(chosen);
+        });
+      }) {}
 
 void WebVstProcessor::prepareToPlay(double sampleRate, int) {
   engineHost_.prepare(sampleRate);

@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "EngineHost.h"
+#include "HostFiles.h"
 #include "SessionState.h"
 
 // Stereo instrument backed by the native webdsp engine (EngineHost). The page drives it through the bridge;
@@ -32,6 +33,7 @@ class WebVstProcessor : public juce::AudioProcessor {
 
   EngineHost& engineHost() { return engineHost_; }
   SessionState& sessionState() { return sessionState_; }
+  HostFiles& hostFiles() { return hostFiles_; }
 
   void getStateInformation(juce::MemoryBlock& destination) override;
   void setStateInformation(const void* data, int sizeInBytes) override;
@@ -39,5 +41,7 @@ class WebVstProcessor : public juce::AudioProcessor {
  private:
   EngineHost engineHost_;
   SessionState sessionState_;
+  HostFiles hostFiles_;
+  std::unique_ptr<juce::FileChooser> fileChooser_;  // alive while a dialog is open
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(WebVstProcessor)
 };

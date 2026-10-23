@@ -225,6 +225,65 @@ test("host state: the plugin answering 'nothing saved' reaches subscribers as nu
   assert.deepEqual(late, [null]);
 });
 
+test("host files: saveFile sends the bytes in chunks and resolves with the saved name, null on cancel, rejects on error", async () => {
+  const { getHostFiles } = await import(pathToFileURL(path.join(webdsp, "lib/index.js")).href);
+  const files = getHostFiles();
+  assert.ok(files, "the shim installs the host files bridge");
+
+  sent.length = 0;
+  const text = JSON.stringify({ project: "x".repeat(250 * 1024) });
+  const saving = files.saveFile({ suggestedName: "Song.webseq.json", data: text });
+  const begin = sent.find((m) => m.type === "files-save-begin");
+  assert.equal(begin.name, "Song.webseq.json");
+  assert.equal(begin.bytes, Buffer.byteLength(text));
+  assert.equal(sent.at(-1).type, "files-save-end");
+  const body = Buffer.concat(sent.filter((m) => m.type === "files-save-chunk").sort((a, b) => a.offsetBytes - b.offsetBytes).map((c) => Buffer.from(c.data, "base64")));
+  assert.equal(body.toString("utf8"), text, "text is saved as UTF-8");
+  native({ type: "files-save-result", id: begin.id, name: "Song.webseq.json" });
+  assert.deepEqual(await saving, { name: "Song.webseq.json" });
+
+  sent.length = 0;
+  const cancelled = files.saveFile({ suggestedName: "a.json", data: new Uint8Array([1, 2, 3]).buffer });
+  const id2 = sent.find((m) => m.type === "files-save-begin").id;
+  native({ type: "files-save-result", id: id2, name: null });
+  assert.equal(await cancelled, null);
+
+  sent.length = 0;
+  const failing = files.saveFile({ suggestedName: "b.json", data: "x" });
+  native({ type: "files-save-result", id: sent.find((m) => m.type === "files-save-begin").id, name: null, error: "could not write /x/b.json" });
+  await assert.rejects(failing, /could not write/);
+});
+
+test("host files: openFile asks with the extensions, reassembles the chunks, and resolves null on cancel", async () => {
+  const { getHostFiles } = await import(pathToFileURL(path.join(webdsp, "lib/index.js")).href);
+  const files = getHostFiles();
+
+  sent.length = 0;
+  const opening = files.openFile({ extensions: ["json"] });
+  const request = sent.find((m) => m.type === "files-open");
+  assert.deepEqual(request.extensions, ["json"]);
+  const content = Buffer.from(Array.from({ length: 200000 }, (_, n) => (n * 13) % 256));
+  native({ type: "files-open-begin", id: request.id, name: "Song.webseq.json", bytes: content.length });
+  for (let at = 0; at < content.length; at += 96 * 1024) {
+    native({ type: "files-open-chunk", id: request.id, offsetBytes: at, data: content.subarray(at, at + 96 * 1024).toString("base64") });
+  }
+  native({ type: "files-open-end", id: request.id });
+  const picked = await opening;
+  assert.equal(picked.name, "Song.webseq.json");
+  assert.deepEqual(Buffer.from(picked.data), content);
+
+  sent.length = 0;
+  const cancelled = files.openFile();
+  native({ type: "files-open-result", id: sent.find((m) => m.type === "files-open").id, cancelled: true });
+  assert.equal(await cancelled, null);
+  assert.deepEqual(sent.find((m) => m.type === "files-open").extensions, []);
+
+  sent.length = 0;
+  const failing = files.openFile();
+  native({ type: "files-open-result", id: sent.find((m) => m.type === "files-open").id, error: "could not read /x" });
+  await assert.rejects(failing, /could not read/);
+});
+
 test("samples are sent in chunks and reassemble to the same bytes", () => {
   sent.length = 0;
   const floats = new Float32Array(100000).map((_, i) => Math.sin(i / 50));
