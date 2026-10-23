@@ -61,6 +61,21 @@ function(webvst_add_plugin target)
     juce::juce_audio_utils
     juce::juce_gui_extra
     PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
+  # macOS: a CLEAN build leaves the bundle with a broken code signature. JUCE signs it, then writes
+  # Contents/Resources/moduleinfo.json in a later POST_BUILD step, so the seal reports "file added" (an incremental rebuild
+  # happens to seal the previous moduleinfo.json first, so it looks fine: that is why a plugin that had been rebuilt many
+  # times loaded and a brand-new one did not). Ableton Live's plugin scanner enforces the seal and silently refuses the
+  # plugin ("a sealed resource is missing or invalid ... not a plugin" in PluginScanner.txt); REAPER does not check. Sign
+  # the finished bundle as the very last step, so every build is valid (ad hoc: enough to load locally; a release build
+  # signs with a Developer ID instead). Defined after juce_add_plugin, so it runs after JUCE's own post-build steps.
+  if(APPLE)
+    add_custom_command(TARGET ${target}_VST3 POST_BUILD
+      COMMAND codesign --force --sign - --timestamp=none "$<GENEX_EVAL:$<TARGET_PROPERTY:${target}_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
+      COMMAND codesign --verify --strict "$<GENEX_EVAL:$<TARGET_PROPERTY:${target}_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
+      COMMENT "Signing ${P_PRODUCT}.vst3 (after moduleinfo.json was added)"
+      VERBATIM)
+  endif()
 endfunction()
 
 # Default URLs are each client's Vite dev server (webseq 5174, webtracker 5175).
