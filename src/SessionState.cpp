@@ -114,7 +114,11 @@ void SessionState::sendRestore() {
     const juce::ScopedLock lock(lock_);
     d = current_;
   }
-  if (!d || !sink_) return;
+  if (!sink_) return;
+  if (!d) {  // a definite "nothing saved", so the page can tell a new session from a slow plugin
+    send(object({{"type", "state-restore-none"}}));
+    return;
+  }
 
   juce::Array<juce::var> blobList;
   for (const auto& [key, bytes] : d->blobs) blobList.add(object({{"key", key}, {"bytes", static_cast<double>(bytes->size())}}));

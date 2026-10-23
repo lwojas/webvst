@@ -210,7 +210,19 @@ test("host state: onRestore asks once, reassembles the restore, serves late subs
   state.publish({ app: "webtracker", format: 2, data: "{}", blobs: {} }); // the app's own state replaces what the host handed back
   const afterPublish = [];
   state.onRestore((snapshot) => afterPublish.push(snapshot));
-  assert.equal(afterPublish.length, 0);
+  assert.deepEqual(afterPublish, [null], "the plugin has answered; the app's own state is not 'restored' state");
+});
+
+test("host state: the plugin answering 'nothing saved' reaches subscribers as null, early and late", async () => {
+  const { getHostState } = await import(pathToFileURL(path.join(webdsp, "lib/index.js")).href);
+  const state = getHostState();
+  const seen = [];
+  state.onRestore((snapshot) => seen.push(snapshot));
+  native({ type: "state-restore-none" });
+  assert.equal(seen.at(-1), null);
+  const late = [];
+  state.onRestore((snapshot) => late.push(snapshot));
+  assert.deepEqual(late, [null]);
 });
 
 test("samples are sent in chunks and reassemble to the same bytes", () => {

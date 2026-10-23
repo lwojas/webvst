@@ -257,6 +257,7 @@
   var committedBlobs = new Map(); // key -> the ArrayBuffer the plugin already holds under it
   var restoreListeners = [];
   var lastRestore = null;
+  var restoreAnswered = false; // the plugin has said what it holds (a snapshot, or nothing)
   var restoreAssembly = null;
   var announcedReady = false;
 
@@ -292,7 +293,7 @@
     },
     onRestore: function (fn) {
       restoreListeners.push(fn);
-      if (lastRestore) fn(lastRestore);
+      if (restoreAnswered) fn(lastRestore);
       if (!announcedReady) {
         announcedReady = true;
         post({ type: 'state-ready' });
@@ -306,8 +307,18 @@
   };
   window.__webdspHost.state = hostState;
 
+  function answerRestore(snapshot) {
+    restoreAnswered = true;
+    lastRestore = snapshot;
+    restoreListeners.slice().forEach(function (fn) {
+      fn(snapshot);
+    });
+  }
+
   function onStateEvent(event) {
-    if (event.type === 'state-restore-begin') {
+    if (event.type === 'state-restore-none') {
+      answerRestore(null);
+    } else if (event.type === 'state-restore-begin') {
       restoreAssembly = { app: event.app, format: event.format, text: [], blobs: {}, bytes: {} };
       for (var i = 0; i < event.blobs.length; i++) restoreAssembly.bytes[event.blobs[i].key] = new Uint8Array(event.blobs[i].bytes);
     } else if (event.type === 'state-restore-text' && restoreAssembly) {
@@ -321,11 +332,9 @@
         blobs[key] = restoreAssembly.bytes[key].buffer;
         committedBlobs.set(key, blobs[key]);
       });
-      lastRestore = { app: restoreAssembly.app, format: restoreAssembly.format, data: restoreAssembly.text.join(''), blobs: blobs };
+      var snapshot = { app: restoreAssembly.app, format: restoreAssembly.format, data: restoreAssembly.text.join(''), blobs: blobs };
       restoreAssembly = null;
-      restoreListeners.slice().forEach(function (fn) {
-        fn(lastRestore);
-      });
+      answerRestore(snapshot);
     }
   }
 

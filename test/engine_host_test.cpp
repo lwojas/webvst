@@ -461,7 +461,8 @@ int main() {
     SessionState live("webseq");
     live.setEventSink([&](const juce::var& e) { events.push_back(e); });
     live.handleMessage(message({{"type", "state-ready"}}));
-    CHECK(events.empty(), "no state, nothing to restore");
+    CHECK(events.size() == 1 && events[0]["type"].toString() == "state-restore-none", "no state: the page is told so, definitively");
+    events.clear();
     live.restore(saved.getData(), saved.getSize());
     CHECK(!events.empty() && events.back()["type"].toString() == "state-restore-end", "a listening page gets a host-loaded state immediately");
 
