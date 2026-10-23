@@ -1,12 +1,12 @@
 // Manual end-to-end check of the host-state round trip (not part of CI: it needs a browser and the two clients'
 // dev servers). Start webseq and webtracker (e.g. `npx vite --port 5190` / `--port 5191`), then:
-//   PLAYWRIGHT_MODULE=<path to playwright> node test/e2e/hoststate-e2e.cjs
+//   PLAYWRIGHT_MODULE=<path to playwright> node e2e/hoststate-e2e.cjs
 // It loads each client in Chromium with the real shim and a fake native that implements the SessionState protocol,
 // edits the BPM, checks the project reached the "host", reloads, and checks it was restored.
 // End to end: real client dev servers + the real shim in Chromium, with a fake native implementing the session protocol.
 const fs = require("fs");
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? "playwright");
-const SHIM = fs.readFileSync(require("path").join(__dirname, "../../src/shim.js"), "utf8");
+const SHIM = fs.readFileSync(require("path").join(__dirname, "../src/shim.js"), "utf8");
 const SEQ_URL = process.env.WEBSEQ_URL ?? "http://localhost:5190";
 const TRACKER_URL = process.env.WEBTRACKER_URL ?? "http://localhost:5191";
 

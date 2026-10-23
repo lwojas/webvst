@@ -59,7 +59,7 @@ The page publishes its project (opaque JSON plus sample blobs, stamped with the 
 webdsp's `getHostState()`; `SessionState` keeps the latest in memory and `getStateInformation` saves it gzip-compressed
 (`WVST` header, end marker), `setStateInformation` loads it and hands it to the page when it asks, or says nothing is
 saved. Set `-DWEBVST_APP_ID=webseq` (or `webtracker`) to make a plugin refuse the other app's state. Saving never waits on
-the page, so a session saves correctly with the editor closed. `test/e2e/hoststate-e2e.cjs` is a manual browser check of
+the page, so a session saves correctly with the editor closed. `e2e/hoststate-e2e.cjs` is a manual browser check of
 the round trip against the real clients.
 
 ## Client URL
