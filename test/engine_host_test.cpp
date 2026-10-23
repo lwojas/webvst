@@ -682,6 +682,177 @@ int main() {
     dir.deleteRecursively();
   }
 
+  {  // MIDI routing: the page declares what a key plays, the plugin plays incoming notes itself
+    auto firstNonZero = [](juce::AudioBuffer<float>& b) {
+      for (int i = 0; i < b.getNumSamples(); i++)
+        if (std::fabs(b.getReadPointer(0)[i]) > 1.0e-6f) return i;
+      return -1;
+    };
+    auto loadSample = [&](Rig& r, int id, const std::vector<float>& pcm) {
+      r.host.handleMessage(parse(("{\"type\":\"sample-begin\",\"sampleId\":" + juce::String(id) + ",\"channels\":1,\"sampleRate\":48000,\"length\":" + juce::String(static_cast<int>(pcm.size())) + "}").toRawUTF8()));
+      auto* o = new juce::DynamicObject();
+      o->setProperty("type", "sample-chunk");
+      o->setProperty("sampleId", id);
+      o->setProperty("channel", 0);
+      o->setProperty("offsetBytes", 0);
+      o->setProperty("data", juce::Base64::toBase64(pcm.data(), pcm.size() * sizeof(float)));
+      r.host.handleMessage(juce::var(o));
+      r.host.handleMessage(parse(("{\"type\":\"sample-end\",\"sampleId\":" + juce::String(id) + "}").toRawUTF8()));
+      r.block();
+    };
+    auto route = [&](Rig& r, const char* json) { r.host.handleMessage(parse((juce::String("{\"type\":\"set-midi-route\",\"route\":") + json + "}").toRawUTF8())); };
+    auto play = [&](Rig& r, std::initializer_list<std::pair<juce::MidiMessage, int>> events, bool countAllocs = false) {
+      r.midiIn.clear();
+      for (auto& e : events) r.midiIn.addEvent(e.first, e.second);
+      const float peak = r.block(countAllocs);
+      r.midiIn.clear();
+      return peak;
+    };
+    const auto on = [](int channel, int note, int vel = 127) { return juce::MidiMessage::noteOn(channel, note, static_cast<juce::uint8>(vel)); };
+    const auto off = [](int channel, int note) { return juce::MidiMessage::noteOff(channel, note); };
+
+    {  // an instrument route: sample-accurate start, nothing before it
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})"));
+      r.block();
+      play(r, {{on(1, 60), 200}});  // no route yet: the plugin plays nothing itself (the page would)
+      CHECK(firstNonZero(r.buf) == -1, "with no route declared the plugin plays nothing itself");
+      route(r, R"({"kind":"instrument","id":1,"unityNote":60,"holdUntilKeyUp":true})");
+      r.block();
+      const float peak = play(r, {{on(1, 62, 127), 200}});
+      const int first = firstNonZero(r.buf);
+      CHECK(peak > 0.01f && first >= 199 && first <= 202, "an instrument route plays a note on its own sample (first sound at %d, peak %.3f)", first, peak);
+    }
+
+    {  // a sample route: start frame, velocity and route gain scale the level
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));  // short, so each note has ended before the next is measured
+      route(r, R"({"kind":"sample","id":7,"unityNote":60,"gain":1})");
+      r.block();
+      const float full = play(r, {{on(1, 60, 127), 10}});
+      CHECK(firstNonZero(r.buf) == 10, "a sample route starts on the note's own frame (%d)", firstNonZero(r.buf));
+      for (int i = 0; i < 6; i++) r.block();  // let it ring out (a one-shot with no hold)
+      route(r, R"({"kind":"sample","id":7,"unityNote":60,"gain":0.5})");
+      r.block();
+      const float half = play(r, {{on(1, 60, 127), 10}});
+      CHECK(full > 0.05f && std::fabs(half / full - 0.5f) < 0.02f, "route gain scales the level (%.3f vs %.3f)", half, full);
+      for (int i = 0; i < 6; i++) r.block();
+      const float soft = play(r, {{on(1, 60, 64), 10}});
+      CHECK(std::fabs(soft / half - 64.0f / 127.0f) < 0.03f, "velocity is the note's level (%.3f vs %.3f)", soft, half);
+    }
+
+    {  // chop: the key picks a cue region and never transposes
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      std::vector<float> pcm(400, 0.0f);
+      for (int i = 0; i < 100; i++) pcm[static_cast<size_t>(i)] = 0.25f;
+      for (int i = 100; i < 200; i++) pcm[static_cast<size_t>(i)] = 0.5f;
+      loadSample(r, 8, pcm);
+      r.host.handleMessage(parse(R"({"type":"set-sample-regions","sample":8,"regions":[{"start":0,"end":100},{"start":100,"end":200}]})"));
+      route(r, R"({"kind":"sample","id":8,"unityNote":60,"chop":true})");
+      r.block();
+      const float slice0 = play(r, {{on(1, 60), 0}});
+      for (int i = 0; i < 3; i++) r.block();
+      const float slice1 = play(r, {{on(1, 61), 0}});
+      CHECK(slice0 > 0.02f && std::fabs(slice1 / slice0 - 2.0f) < 0.1f, "chop: key unity+1 plays the second slice (%.3f vs %.3f)", slice1, slice0);
+      for (int i = 0; i < 3; i++) r.block();
+      CHECK(play(r, {{on(1, 59), 0}}) == 0.0f, "chop: a key below the first slice plays nothing");
+    }
+
+    {  // hold: a looping sample sustains until key-up, and a note shorter than a block is never left stuck
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(48000, 0.5f));
+      route(r, R"({"kind":"sample","id":7,"unityNote":60,"loop":true,"holdUntilKeyUp":true})");
+      r.block();
+      play(r, {{on(1, 60), 0}});
+      const float held = play(r, {});
+      CHECK(held > 0.05f, "a held key keeps sounding across blocks (%.3f)", held);
+      play(r, {{off(1, 60), 50}});
+      float tail = 1.0f;
+      for (int i = 0; i < 6; i++) tail = play(r, {});
+      CHECK(tail < 1.0e-4f, "key-up releases the voice (%.6f left)", tail);
+
+      play(r, {{on(1, 62), 100}, {off(1, 62), 150}});  // pressed and released inside one block
+      float stuck = 1.0f;
+      for (int i = 0; i < 6; i++) stuck = play(r, {});
+      CHECK(stuck < 1.0e-4f, "a note shorter than a block is not left stuck (%.6f)", stuck);
+
+      play(r, {{on(1, 64), 0}, {on(1, 65), 0}});  // two held keys, then all notes off
+      play(r, {{juce::MidiMessage::controllerEvent(1, 123, 0), 20}});
+      float afterAll = 1.0f;
+      for (int i = 0; i < 6; i++) afterAll = play(r, {});
+      CHECK(afterAll < 1.0e-4f, "CC 123 ends every held note (%.6f)", afterAll);
+    }
+
+    {  // channel filter and clearing
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      route(r, R"({"kind":"sample","id":7,"unityNote":60,"channel":9})");
+      r.block();
+      CHECK(play(r, {{on(1, 60), 0}}) == 0.0f, "a route for channel 10 ignores channel 1");
+      CHECK(play(r, {{on(10, 60), 0}}) > 0.05f, "and plays channel 10");
+      for (int i = 0; i < 6; i++) r.block();
+      route(r, "null");
+      r.block();
+      CHECK(play(r, {{on(10, 60), 0}}) == 0.0f, "a cleared route plays nothing");
+    }
+
+    {  // the route belongs to the engine it was declared for: a page reload drops it
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(48000, 0.5f));
+      route(r, R"({"kind":"sample","id":7,"unityNote":60})");
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));  // the page reloaded: a fresh engine
+      r.block();
+      CHECK(play(r, {{on(1, 60), 0}}) == 0.0f, "after the engine is replaced the old route no longer plays");
+    }
+
+    {  // no allocation on the audio thread while routing, and the router's voices never reach the page
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32})"));
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})"));
+      loadSample(r, 7, std::vector<float>(2000, 0.5f));
+      route(r, R"({"kind":"sample","id":7,"unityNote":60,"mono":true,"loop":true,"holdUntilKeyUp":true,"chokeGroup":1})");
+      r.block();
+      g_allocs = 0;
+      play(r, {{on(1, 60), 10}, {on(1, 64), 20}, {off(1, 60), 40}, {on(1, 67, 90), 60}, {off(1, 64), 70}}, true);
+      long worst = g_allocs.load();
+      route(r, R"({"kind":"instrument","id":1,"unityNote":60,"holdUntilKeyUp":true})");
+      r.block();
+      g_allocs = 0;
+      play(r, {{on(1, 60), 5}, {on(1, 62), 30}, {off(1, 62), 80}}, true);
+      worst = std::max(worst, g_allocs.load());
+      CHECK(worst == 0, "routing notes allocates nothing on the audio thread (%ld)", worst);
+
+      r.events.clear();
+      for (int i = 0; i < 10; i++) r.block();
+      r.pump();
+      int leaked = 0;
+      for (auto& e : r.events)
+        if (e["type"].toString() == "voice-ended" && static_cast<int>(e["voice"]) >= (1 << 30)) leaked++;
+      CHECK(leaked == 0, "the router's voices are never reported to the page (%d leaked)", leaked);
+    }
+
+    {  // the page is told the plugin can route
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":8})"));
+      const juce::var* ready = r.first("ready");
+      CHECK(ready && static_cast<bool>((*ready)["midiRouting"]), "ready reports midiRouting");
+    }
+  }
+
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);
   return failures == 0 ? 0 : 1;
 }
