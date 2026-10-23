@@ -5,7 +5,10 @@ namespace {
 constexpr int kFormatVersion = 1;
 constexpr int kEndMarker = 0x54535657;  // closes the body, so a truncated blob is never mistaken for a whole one
 constexpr int64_t kMaxBlobBytes = int64_t{1} << 31;
-constexpr int kTextChunkChars = 256 * 1024;
+// The saved project's text goes to the page as base64 of its UTF-8 bytes, in chunks of this many bytes. NOT as a JSON
+// string: the text is JSON itself, so as a string it is full of quotes and backslashes, and JUCE's emitEvent escapes every
+// one with String::replace, which is quadratic in their number (64 K characters took 6 s; as base64, 10 ms).
+constexpr size_t kTextChunkBytes = 96 * 1024;
 constexpr size_t kBlobChunkBytes = 96 * 1024;
 
 juce::var object(std::initializer_list<std::pair<const char*, juce::var>> props) {
@@ -125,8 +128,9 @@ void SessionState::sendRestore() {
   for (const auto& [key, bytes] : d->blobs) blobList.add(object({{"key", key}, {"bytes", static_cast<double>(bytes->size())}}));
   Trace::log("native: sending the saved project to the page (" + juce::String(d->text.length()) + " chars, " + juce::String(static_cast<int>(d->blobs.size())) + " blobs)");
   send(object({{"type", "state-restore-begin"}, {"app", d->app}, {"format", d->format}, {"blobs", blobList}}));
-  for (int at = 0; at < d->text.length(); at += kTextChunkChars)
-    send(object({{"type", "state-restore-text"}, {"data", d->text.substring(at, at + kTextChunkChars)}}));
+  const std::string utf8 = d->text.toStdString();
+  for (size_t at = 0; at < utf8.size(); at += kTextChunkBytes)
+    send(object({{"type", "state-restore-text"}, {"b64", juce::Base64::toBase64(utf8.data() + at, std::min(kTextChunkBytes, utf8.size() - at))}}));
   for (const auto& [key, bytes] : d->blobs) {
     for (size_t at = 0; at < bytes->size(); at += kBlobChunkBytes) {
       const size_t n = std::min(kBlobChunkBytes, bytes->size() - at);

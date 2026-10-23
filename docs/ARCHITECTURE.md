@@ -55,6 +55,15 @@ Transport: the plugin declares **100 ms latency** (plugin delay compensation) an
 ahead, so the page, which hears of a start after the fact, can sound the first beat on time while the DAW delays everything
 else to match. Clock: the native rendered-frame count (~30 Hz); the page extrapolates `currentTime` from it.
 
+### A rule for anything large sent to the page
+
+Native → page events go through JUCE's `emitEventIfBrowserIsVisible`, which serialises the event and escapes it with
+`String::replace` for `\` and `'`; that is **quadratic in the number of backslashes and quotes**. Text that is itself JSON
+(a saved project) is full of both: 64 K characters took ~6 s in one event (measured; it made WebTracker's window take ~4.5 s to
+show its project), against 10 ms as base64. So large text goes as base64 of its UTF-8 bytes (`state-restore-text {b64}`), and binary
+already does. The host test measures this cost (`juceEmitCostMs`) and fails if a restore event becomes slow. The other direction
+(the page's `JSON.stringify` → native `JSON::parse`) is linear: 1.6 ms for the same text.
+
 ## Build and test
 
 ```

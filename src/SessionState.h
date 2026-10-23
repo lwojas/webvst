@@ -15,7 +15,8 @@
 // Page -> plugin messages (all on the "webvst" event channel, all on the message thread):
 //   state-begin {app, format}, state-text {data}*, state-blob-begin {key, bytes}, state-blob-chunk {key,
 //   offsetBytes, data (base64)}*, state-commit {keys}, state-clear, state-ready.
-// Plugin -> page: state-restore-none (nothing saved), or state-restore-begin {app, format, blobs:[{key,bytes}]}, state-restore-text {data}*,
+// Plugin -> page: state-restore-none (nothing saved), or state-restore-begin {app, format, blobs:[{key,bytes}]},
+//   state-restore-text {b64: base64 of the text's UTF-8 bytes}*,
 //   state-restore-blob {key, offsetBytes, data}*, state-restore-end.
 // A commit replaces the snapshot atomically; a blob the page does not re-send keeps the copy we hold.
 class SessionState {
