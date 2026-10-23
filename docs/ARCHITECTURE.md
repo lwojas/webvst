@@ -86,6 +86,11 @@ node --test test/                                  # the shim against the real w
   previous copy first, which hid it). The build now re-signs the finished bundle as its last step (`CMakeLists.txt`,
   `webvst_add_plugin`), and CI verifies a clean build's signature. Check a bundle with `codesign -vv --strict <bundle>`; it must say
   "valid on disk". REAPER does not check the seal, so a broken signature only shows up in Ableton.
+- **Slow window open?** Turn on the trace: set `WEBVST_TRACE=1` in the host's environment, or create the file `~/.webvst-trace`, open
+  the window, and read `~/Library/Logs/WebVST/trace.log`. It puts native events (editor created, page about to load / finished
+  loading, first message, engine ready, saved project sent) and the page's own marks (shim started, DOMContentLoaded, window load,
+  first paint, saved project received, engine ready received, app visible and no start veil) on one millisecond clock, so the gap
+  that is slow is visible. Off by default (no file is touched). Remove the file / variable when done.
 - **Rebuilt the plugin and the DAW still behaves the old way?** The DAW caches plugins: replace the bundle in
   `~/Library/Audio/Plug-Ins/VST3/` with the host closed, then rescan.
 - **Bump webdsp:** `git -C third_party/webdsp fetch && git -C third_party/webdsp checkout <sha> && git add third_party/webdsp`,

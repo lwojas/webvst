@@ -1,4 +1,5 @@
 #include "EngineHost.h"
+#include "Trace.h"
 #include <cmath>
 #include <cstdlib>
 
@@ -161,6 +162,7 @@ void EngineHost::beginInit(const juce::var& message) {
   resendTransport_.store(true, std::memory_order_relaxed);
   lastSentTransport_ = {};
   send(buildReady(maxVoices));
+  Trace::log("native: engine ready sent to the page");
 }
 
 juce::var EngineHost::buildReady(int maxVoices) {

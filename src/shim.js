@@ -18,6 +18,29 @@
   window.__webdspHost = { kind: 'native' };
 
   var CHANNEL = 'webvst';
+
+  // Opt-in timing marks (the plugin sets initialisation data `trace` when tracing is on; see Trace.h). Each mark is sent to
+  // native with the page clock, so one log shows native and page events together.
+  var tracing = !!(window.__JUCE__.initialisationData && window.__JUCE__.initialisationData.trace && window.__JUCE__.initialisationData.trace[0]);
+  function mark(name) {
+    if (tracing) backend.emitEvent(CHANNEL, { type: '__trace', mark: name, t: performance.now() });
+  }
+  if (tracing) {
+    mark('shim started (document start)');
+    document.addEventListener('DOMContentLoaded', function () { mark('DOMContentLoaded'); });
+    window.addEventListener('load', function () { mark('window load'); });
+    try {
+      new PerformanceObserver(function (list) {
+        list.getEntries().forEach(function (e) { mark(e.name + ' at ' + Math.round(e.startTime) + ' ms'); });
+      }).observe({ type: 'paint', buffered: true });
+    } catch (e) {}
+    var veilWatch = setInterval(function () {
+      if (document.querySelector('.gesture-veil')) return;
+      if (!document.body || document.body.children.length === 0) return;
+      mark('app visible and no start veil');
+      clearInterval(veilWatch);
+    }, 50);
+  }
   var CHUNK_BYTES = 96 * 1024; // raw PCM bytes per message; a multiple of 4
 
   function post(message) {
@@ -308,6 +331,7 @@
   window.__webdspHost.state = hostState;
 
   function answerRestore(snapshot) {
+    mark(snapshot ? 'saved project received' : 'no saved project (answer received)');
     restoreAnswered = true;
     lastRestore = snapshot;
     restoreListeners.slice().forEach(function (fn) {
@@ -439,6 +463,7 @@
       return;
     }
     if (event.type === 'ready') {
+      mark('engine ready received');
       sampleRate = event.sampleRate;
       offset = null;
       onClock(event.clockFrame, event.sampleRate);

@@ -303,3 +303,32 @@ test("samples are sent in chunks and reassemble to the same bytes", () => {
   assert.equal(bytes.length, floats.length * 4);
 });
 
+
+test("tracing is off unless the plugin turns it on, and then the page sends timing marks", async () => {
+  const vm = await import("node:vm");
+  const run = (initialisationData) => {
+    const posted = [];
+    const listeners = {};
+    const sandbox = { performance, Uint8Array, Map, Promise, Object, setTimeout, setInterval, clearInterval, console, btoa, atob };
+    sandbox.window = sandbox;
+    sandbox.navigator = {};
+    sandbox.document = { addEventListener: (name, fn) => (listeners[name] = fn), querySelector: () => null, body: { children: [1] } };
+    sandbox.addEventListener = (name, fn) => (listeners[name] = fn);
+    sandbox.__JUCE__ = { initialisationData, backend: { emitEvent: (_c, m) => posted.push(m), addEventListener() {} } };
+    vm.createContext(sandbox);
+    vm.runInContext(fs.readFileSync(path.join(here, "../src/shim.js"), "utf8"), sandbox);
+    return { posted, listeners };
+  };
+
+  assert.deepEqual(run(undefined).posted, [], "no initialisation data: silent");
+  assert.deepEqual(run({ trace: [false] }).posted, [], "trace off: silent");
+
+  const on = run({ trace: [true] });
+  assert.equal(on.posted[0].type, "__trace");
+  assert.match(on.posted[0].mark, /shim started/);
+  assert.equal(typeof on.posted[0].t, "number");
+  on.listeners.DOMContentLoaded();
+  on.listeners.load();
+  const marks = on.posted.map((m) => m.mark);
+  assert.ok(marks.includes("DOMContentLoaded") && marks.includes("window load"));
+});

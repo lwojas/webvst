@@ -1,4 +1,5 @@
 #include "SessionState.h"
+#include "Trace.h"
 
 namespace {
 constexpr int kFormatVersion = 1;
@@ -122,6 +123,7 @@ void SessionState::sendRestore() {
 
   juce::Array<juce::var> blobList;
   for (const auto& [key, bytes] : d->blobs) blobList.add(object({{"key", key}, {"bytes", static_cast<double>(bytes->size())}}));
+  Trace::log("native: sending the saved project to the page (" + juce::String(d->text.length()) + " chars, " + juce::String(static_cast<int>(d->blobs.size())) + " blobs)");
   send(object({{"type", "state-restore-begin"}, {"app", d->app}, {"format", d->format}, {"blobs", blobList}}));
   for (int at = 0; at < d->text.length(); at += kTextChunkChars)
     send(object({{"type", "state-restore-text"}, {"data", d->text.substring(at, at + kTextChunkChars)}}));
@@ -135,6 +137,7 @@ void SessionState::sendRestore() {
     }
   }
   send(object({{"type", "state-restore-end"}}));
+  Trace::log("native: saved project sent");
 }
 
 // "WVST" | int version | gzip( app, format, text, blobCount, { key, size, bytes }* )

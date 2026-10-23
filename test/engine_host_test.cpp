@@ -2,6 +2,7 @@
 // would, and checks audio, events and (the point of the SPSC design) that steady-state rendering does
 // not allocate. Run via: cmake -B build -DWEBVST_BUILD_TESTS=ON && cmake --build build --target WebVstHostTest
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -77,6 +78,19 @@ struct Rig {
 
 int main() {
   juce::ScopedJuceInitialiser_GUI init;
+  {  // How long the page waits on the message thread when it connects (the engine is built before `ready` is sent).
+    using Clock = std::chrono::steady_clock;
+    EngineHost host;
+    const auto t0 = Clock::now();
+    host.prepare(48000.0);
+    const auto t1 = Clock::now();
+    host.handleMessage(parse(R"({"type":"__init","maxVoices":128,"outputChannels":2})"));
+    const auto t2 = Clock::now();
+    const double prepareMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const double initMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+    std::printf("info: engine build + warm-up: prepare %.0f ms, page connect (__init) %.0f ms\n", prepareMs, initMs);
+    CHECK(initMs < 500.0, "connecting a page does not stall the message thread (%.0f ms)", initMs);
+  }
   {
     Rig r;
     r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"outputChannels":2})"));
