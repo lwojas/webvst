@@ -59,6 +59,7 @@ An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence
 
 - The sequence arrives as one `set-sequence` message, is built into plain structs on the message thread and swapped in by pointer (the old one is freed on the message thread through a dispose event), so the audio thread allocates nothing.
 - Voices it starts use ids from `1<<29` up and are never reported to the page. A stop or locate releases what is sounding. A mono track releases its previous voice at the next event's frame.
+- The engine's beat grid (tempo-aware synths such as Pulse) is anchored by the plugin itself at the song's beat 0 and the DAW's tempo, on start, locate and tempo change.
 - A replaced engine (the page reloading) drops the sequence, because its ids belonged to the old engine; the app declares it again.
 - Limits: tempo is read once per block; a locate inside a block is noticed at the next; at most 1024 events fire in one block.
 

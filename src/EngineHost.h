@@ -199,11 +199,12 @@ class EngineHost : private juce::Timer {
   int32_t seqSustained_[kSeqSustained] = {};  // instruments given a timed note, ended on stop/locate
   int seqSustainedCount_ = 0;
   bool seqWasPlaying_ = false;
+  double seqGridBpm_ = 0.0;
   double seqExpectedPpq_ = 0.0;
   DueEvent due_[kMaxDuePerBlock];
   int dueCount_ = 0;
   double dueBpm_ = 120.0;
-  void runSequence(const HostTimeInfo& host, int numFrames);
+  void runSequence(const HostTimeInfo& host, int numFrames, int64_t blockStart);
   void applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame);
   void releaseSequence();
 

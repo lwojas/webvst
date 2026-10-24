@@ -874,7 +874,7 @@ void EngineHost::releaseRouted() {
 // Finds the sequence events due in this block and lists them (with their frame inside the block) in due_. The sequence is the DAW
 // timeline's: at host position p it plays the cycle's p mod lengthBeats, delayed by the declared latency so it lines up with the
 // other tracks after plugin delay compensation. A stop or locate releases what is sounding. Allocation-free.
-void EngineHost::runSequence(const HostTimeInfo& host, int numFrames) {
+void EngineHost::runSequence(const HostTimeInfo& host, int numFrames, int64_t blockStart) {
   dueCount_ = 0;
   const bool playing = host.valid && host.playing && sequence_ && engine_ && host.bpm > 0.0;
   if (!playing) {
@@ -887,7 +887,14 @@ void EngineHost::runSequence(const HostTimeInfo& host, int numFrames) {
   const double latencyBeats = kHostLatencySeconds * bpm / 60.0;
   const double start = host.ppq - latencyBeats;
   const double end = start + numFrames * beatsPerFrame;
-  if (seqWasPlaying_ && std::fabs(host.ppq - seqExpectedPpq_) > 0.02) releaseSequence();  // a locate or a loop wrap
+  const bool locate = seqWasPlaying_ && std::fabs(host.ppq - seqExpectedPpq_) > 0.02;
+  if (locate) releaseSequence();  // a locate or a loop wrap
+  if (!seqWasPlaying_ || locate || std::fabs(bpm - seqGridBpm_) > 1.0e-6) {
+    // Tempo-aware synths (Pulse's pump) lock to the engine's beat grid: anchor it where the song's beat 0 is, at the DAW's tempo.
+    const double anchor = static_cast<double>(blockStart) - start * 60.0 / bpm * sampleRate_;
+    engine_->scheduleTransport(blockStart, anchor, bpm);
+    seqGridBpm_ = bpm;
+  }
   seqWasPlaying_ = true;
   seqExpectedPpq_ = host.ppq + numFrames * beatsPerFrame;
   dueBpm_ = bpm;
@@ -952,7 +959,7 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
   while (cmds_.pop(cmd)) applyCmd(cmd, blockStart);
   trackTransport(host, blockStart, numFrames);
   forwardMidi(midi, blockStart);
-  runSequence(host, numFrames);
+  runSequence(host, numFrames, blockStart);
 
   buffer.clear();
   if (engine_) {
