@@ -853,6 +853,136 @@ int main() {
     }
   }
 
+  {  // native sequence: the host plays the song against the DAW transport (webdsp docs/native-sequence.md)
+    auto loadSample = [&](Rig& r, int id, const std::vector<float>& pcm) {
+      r.host.handleMessage(parse(("{\"type\":\"sample-begin\",\"sampleId\":" + juce::String(id) + ",\"channels\":1,\"sampleRate\":48000,\"length\":" + juce::String(static_cast<int>(pcm.size())) + "}").toRawUTF8()));
+      auto* o = new juce::DynamicObject();
+      o->setProperty("type", "sample-chunk");
+      o->setProperty("sampleId", id);
+      o->setProperty("channel", 0);
+      o->setProperty("offsetBytes", 0);
+      o->setProperty("data", juce::Base64::toBase64(pcm.data(), pcm.size() * sizeof(float)));
+      r.host.handleMessage(juce::var(o));
+      r.host.handleMessage(parse(("{\"type\":\"sample-end\",\"sampleId\":" + juce::String(id) + "}").toRawUTF8()));
+      r.block();
+    };
+    auto setSeq = [&](Rig& r, const char* json) { r.host.handleMessage(parse((juce::String("{\"type\":\"set-sequence\",\"sequence\":") + json + "}").toRawUTF8())); };
+    // Plays `blocks` host blocks at 120 bpm from `ppq`; returns the absolute frames (from the first block) where a sound begins.
+    auto onsets = [&](Rig& r, int blocks, double ppq, bool countAllocs = false) {
+      std::vector<int64_t> found;
+      float prev = 0.0f;
+      r.hostInfo.valid = true;
+      r.hostInfo.playing = true;
+      r.hostInfo.bpm = 120.0;
+      for (int b = 0; b < blocks; b++) {
+        r.hostInfo.ppq = ppq + b * kBlock / kSr * 2.0;
+        r.block(countAllocs);
+        const float* d = r.buf.getReadPointer(0);
+        for (int i = 0; i < kBlock; i++) {
+          if (d[i] != 0.0f && prev == 0.0f) found.push_back(static_cast<int64_t>(b) * kBlock + i);
+          prev = d[i];
+        }
+      }
+      return found;
+    };
+
+    {  // timing: events land on the DAW timeline (delayed by the declared latency), and the cycle repeats
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      setSeq(r, R"({"lengthBeats":2,"events":[{"beat":1,"kind":"sample","sample":7}]})");
+      r.block();
+      const int latency = r.host.latencySamples();
+      const auto hits = onsets(r, 160, 0.0);  // ~1.7 s = 3.4 beats
+      const int64_t first = 24000 + latency, second = 3 * 24000 + latency;
+      CHECK(hits.size() == 2, "the cycle plays once per lengthBeats (%zu hits)", hits.size());
+      if (hits.size() == 2)
+        CHECK(std::llabs(hits[0] - first) <= 2 && std::llabs(hits[1] - second) <= 2,
+              "events are sample-accurate on the DAW timeline (%lld, %lld; wanted %lld, %lld)", (long long)hits[0], (long long)hits[1], (long long)first, (long long)second);
+    }
+
+    {  // a locate mid-song plays the cycle from there; stop is silent; a stopped transport plays nothing
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      setSeq(r, R"({"lengthBeats":4,"events":[{"beat":0,"kind":"sample","sample":7},{"beat":3,"kind":"sample","sample":7}]})");
+      r.block();
+      const auto hits = onsets(r, 40, 2.9);  // starts just before beat 3 of some cycle (+0.2 latency)
+      CHECK(hits.size() == 1, "a locate into the song plays the events after it (%zu hits)", hits.size());
+      r.hostInfo.playing = false;
+      float peak = 0.0f;
+      for (int i = 0; i < 20; i++) peak = std::max(peak, r.block());
+      CHECK(peak == 0.0f, "a stopped transport plays nothing from the sequence");
+    }
+
+    {  // instruments and parameter writes
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})"));
+      r.block();
+      setSeq(r, R"({"lengthBeats":4,"events":[{"beat":0.5,"kind":"instrument","instrument":1,"durationBeats":0.5},{"beat":1,"kind":"param","target":{"instrument":1},"param":0,"value":0.5,"from":0.1,"rampBeats":1}]})");
+      r.block();
+      float peak = 0.0f;
+      r.hostInfo.valid = true;
+      r.hostInfo.playing = true;
+      r.hostInfo.bpm = 120.0;
+      for (int b = 0; b < 120; b++) {
+        r.hostInfo.ppq = b * kBlock / kSr * 2.0;
+        peak = std::max(peak, r.block());
+      }
+      CHECK(peak > 0.01f, "a sequence instrument note sounds (peak %.3f)", peak);
+    }
+
+    {  // no allocation on the audio thread, none of the sequence's voices reach the page, a swapped engine drops it
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32})"));
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})"));
+      loadSample(r, 7, std::vector<float>(2000, 0.5f));
+      std::string events = "[";
+      for (int i = 0; i < 64; i++) {
+        if (i) events += ",";
+        events += "{\"beat\":" + std::to_string(i * 0.0625) + ",\"kind\":\"sample\",\"sample\":7,\"mono\":true,\"track\":1,\"durationBeats\":0.05}";
+        events += ",{\"beat\":" + std::to_string(i * 0.0625) + ",\"kind\":\"instrument\",\"instrument\":1,\"durationBeats\":0.03}";
+      }
+      events += "]";
+      setSeq(r, ("{\"lengthBeats\":4,\"events\":" + events + "}").c_str());
+      r.block();
+      g_allocs = 0;
+      onsets(r, 80, 0.0, true);
+      CHECK(g_allocs.load() == 0, "playing a sequence allocates nothing on the audio thread (%ld)", g_allocs.load());
+      r.events.clear();
+      for (int i = 0; i < 10; i++) r.block();
+      r.pump();
+      int leaked = 0;
+      for (auto& e : r.events)
+        if (e["type"].toString() == "voice-ended" && static_cast<int>(e["voice"]) >= (1 << 29)) leaked++;
+      CHECK(leaked == 0, "the sequence's voices are never reported to the page (%d leaked)", leaked);
+
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));  // the page reloaded: a fresh engine
+      r.block();
+      float peak = 0.0f;
+      for (int i = 0; i < 40; i++) peak = std::max(peak, r.block());
+      CHECK(peak == 0.0f, "after the engine is replaced the old sequence no longer plays");
+    }
+
+    {  // clearing, and the page being told
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":8})"));
+      const juce::var* ready = r.first("ready");
+      CHECK(ready && static_cast<bool>((*ready)["nativeSequence"]), "ready reports nativeSequence");
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      setSeq(r, R"({"lengthBeats":2,"events":[{"beat":0,"kind":"sample","sample":7}]})");
+      r.block();
+      r.host.handleMessage(parse(R"({"type":"set-sequence","sequence":null})"));
+      r.block();
+      CHECK(onsets(r, 100, 0.0).empty(), "a null sequence clears it");
+    }
+  }
+
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);
   return failures == 0 ? 0 : 1;
 }

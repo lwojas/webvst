@@ -17,8 +17,9 @@ const listeners = {};
 const native = (event) => listeners.webvst(event);
 const READY = {
   type: "ready",
-  protocolVersion: 2,
+  protocolVersion: 3,
   midiRouting: true,
+  nativeSequence: true,
   sampleRate: 48000,
   outputChannels: 2,
   maxVoices: 64,
@@ -53,6 +54,7 @@ test("AudioRuntime creates itself through the fakes and reports the host's capab
   assert.equal(runtime.getCapabilities().sampleRate, 48000);
   assert.equal(runtime.getCapabilities().hostProtocolVersion, 2);
   assert.equal(runtime.getCapabilities().midiRouting, true);
+  assert.equal(runtime.getCapabilities().nativeSequence, true);
   const init = sent.find((m) => m.type === "__init");
   assert.equal(init.maxVoices, 128);
 });
@@ -302,6 +304,24 @@ test("MIDI routing: setMidiRoute sends a cleaned route for a known target, null 
   sent.length = 0;
   runtime.setMidiRoute(null);
   assert.equal(sent.find((m) => m.type === "set-midi-route").route, null);
+});
+
+test("native sequence: setSequence sends a cleaned, sorted sequence; unknown ids are dropped; null clears", () => {
+  const id = runtime.createInstrument(0, {});
+  sent.length = 0;
+  runtime.setSequence({
+    lengthBeats: 4,
+    events: [
+      { beat: 2, kind: "instrument", instrument: id, durationBeats: 0.5 },
+      { beat: 1, kind: "instrument", instrument: id },
+      { beat: 1, kind: "instrument", instrument: 999 },
+    ],
+  });
+  const seq = sent.find((m) => m.type === "set-sequence").sequence;
+  assert.deepEqual(seq.events.map((e) => e.beat), [1, 2]);
+  sent.length = 0;
+  runtime.setSequence(null);
+  assert.equal(sent.find((m) => m.type === "set-sequence").sequence, null);
 });
 
 test("samples are sent in chunks and reassemble to the same bytes", () => {

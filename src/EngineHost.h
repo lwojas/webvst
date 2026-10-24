@@ -33,7 +33,7 @@ class EngineHost : private juce::Timer {
 
   // The webdsp command/event protocol version this host implements (webdsp/src/runtime/commandProtocol.ts,
   // HOST_PROTOCOL_VERSION). Reported in the ready event so a newer web app can notice an older plugin.
-  static constexpr int kProtocolVersion = 2;  // 2: set-midi-route / ready.midiRouting
+  static constexpr int kProtocolVersion = 3;  // 2: set-midi-route / ready.midiRouting; 3: set-sequence / ready.nativeSequence
 
   // Every message type handleMessage understands: the HostCommand types plus the shim's own sample-transfer
   // messages. Tests check that it covers webdsp's HostCommand union.
@@ -77,7 +77,7 @@ class EngineHost : private juce::Timer {
     SwapEngine, LoadSample, RemoveSample, Trigger, ScheduleEvent, Release, Stop, VoiceParam, BusParam,
     FxAdd, FxRemove, FxMove, FxEnabled, FxParam, FxLfo, InstCreate, InstRemove, InstNoteOn, InstNoteOff,
     InstParam, InstLfo, Transport, ClearRegions, AddRegion, SampleParam, ScheduleParam, CancelScheduled,
-    StartCapture, StopCapture, ArmCapture, ConfigureVoices, SetMidiRoute
+    StartCapture, StopCapture, ArmCapture, ConfigureVoices, SetMidiRoute, SetSequence
   };
 
   // Field use per type is documented where the message thread fills it (EngineHost.cpp, handleMessage).
@@ -89,7 +89,7 @@ class EngineHost : private juce::Timer {
     void* p = nullptr;
   };
 
-  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport, Midi };
+  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport, Midi, DisposeSequence };
   enum ErrorCode : int32_t { kErrAddEffect = 1, kErrCreateInstrument, kErrEffectLfo, kErrInstrumentLfo, kErrArmCapture, kErrQueueFull };
 
   struct Evt {
@@ -171,6 +171,41 @@ class EngineHost : private juce::Timer {
   int32_t heldVoice_[128] = {};  // sample voice per MIDI note, while held (hold routes)
   int32_t monoVoice_ = 0;        // the last voice of a mono route
   int32_t lastInstrumentNote_ = -1;
+
+  // audio thread state: the native sequence (webdsp docs/native-sequence.md). The page sends one cycle of the song in quarter notes;
+  // each block, the events falling in the block's slice of the DAW timeline are due, and are played between render segments split
+  // at their frames (as MIDI routing does), so they are sample-accurate and a mono release lands exactly at the next note.
+  struct SeqEvent {
+    double beat = 0.0;
+    uint8_t kind = 0;  // 0 sample, 1 instrument, 2 param
+    bool loop = false, mono = false, hasFrom = false;
+    int32_t id = 0, bus = 0, region = -1, chokeGroup = 0, track = -1, param = 0, target = 0;
+    float gain = 1.0f, pan = 0.0f, pitch = 0.0f, value = 0.0f, from = 0.0f;
+    double durationBeats = -1.0, rampBeats = 0.0;
+  };
+  struct Sequence {
+    double lengthBeats = 0.0;
+    std::vector<SeqEvent> events;  // sorted by beat
+  };
+  struct DueEvent { int at; const SeqEvent* event; };
+  static constexpr int32_t kSeqVoiceBase = 1 << 29;  // sequence voice ids: [1<<29, 1<<30); like the router's, never the page's
+  static constexpr int kMaxDuePerBlock = 1024;
+  static constexpr int kSeqTracks = 64, kSeqSustained = 32;
+  std::unique_ptr<Sequence> sequence_;
+  int32_t nextSeqVoice_ = kSeqVoiceBase;
+  int32_t seqTrackVoice_[kSeqTracks] = {};
+  int32_t seqRecentVoices_[256] = {};  // ring of the latest voices, released on stop/locate (releasing an ended voice is harmless)
+  int seqRecentNext_ = 0;
+  int32_t seqSustained_[kSeqSustained] = {};  // instruments given a timed note, ended on stop/locate
+  int seqSustainedCount_ = 0;
+  bool seqWasPlaying_ = false;
+  double seqExpectedPpq_ = 0.0;
+  DueEvent due_[kMaxDuePerBlock];
+  int dueCount_ = 0;
+  double dueBpm_ = 120.0;
+  void runSequence(const HostTimeInfo& host, int numFrames);
+  void applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame);
+  void releaseSequence();
 
   // audio thread state: host transport tracking
   bool lastPlaying_ = false, lastLoopOn_ = false;
