@@ -156,7 +156,9 @@ int main() {
     if (ready) {
       CHECK(static_cast<int>((*ready)["sampleRate"]) == 48000, "ready reports the host sample rate");
       CHECK((*ready)["instruments"].size() == 18, "ready lists 18 instrument kinds (got %d)", (*ready)["instruments"].size());
-      CHECK((*ready)["effects"].size() == 9, "ready lists 9 effect kinds (got %d)", (*ready)["effects"].size());
+      CHECK((*ready)["effects"].size() == 10, "ready lists 10 effect kinds (got %d)", (*ready)["effects"].size());
+      CHECK((*ready)["effects"][9]["kind"].operator int() == 9 && (*ready)["effects"][9]["params"].size() == 4,
+            "ready lists the Dub Delay (kind 9) with its four params");
       CHECK((*ready)["modulation"]["waveforms"].size() > 0, "ready lists LFO waveforms");
     }
     r.block();  // applies the engine swap
