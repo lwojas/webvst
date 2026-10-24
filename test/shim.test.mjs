@@ -52,7 +52,7 @@ test("the shim marks the page as an embedded host", () => {
 
 test("AudioRuntime creates itself through the fakes and reports the host's capabilities", () => {
   assert.equal(runtime.getCapabilities().sampleRate, 48000);
-  assert.equal(runtime.getCapabilities().hostProtocolVersion, 2);
+  assert.equal(runtime.getCapabilities().hostProtocolVersion, 3);
   assert.equal(runtime.getCapabilities().midiRouting, true);
   assert.equal(runtime.getCapabilities().nativeSequence, true);
   const init = sent.find((m) => m.type === "__init");
