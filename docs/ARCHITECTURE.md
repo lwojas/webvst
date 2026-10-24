@@ -138,10 +138,10 @@ node --test test/                                  # the shim against the real w
 
 ## Known limits and not done yet
 
-- The page's JS sequencer is the timing authority: closing the editor stops playback, tempo changes restart the schedule,
-  offline bounce is unsupported. Fix: a beat-domain event list pushed to native (WebView stays UI-only).
+- With no native sequence (an older plugin, or a browser) the page's JS sequencer is the timing authority: closing the editor
+  stops playback and offline bounce is unsupported. With it (see "Native sequence"), the host plays the song.
 - MIDI routing covers notes (and all-notes-off); pitch bend, CCs and sustain still go to the page only.
 - No hardware MIDI controllers in a macOS plugin WebView (WKWebView has no Web MIDI); no MIDI output; SysEx not forwarded.
-- Release packaging is not done: the plugin loads its client by URL. Planned for release: a versioned snapshot of each
+- Release packaging is not done: see [RELEASE.md](RELEASE.md). The plugin loads its client by URL. Planned for release: a versioned snapshot of each
   client's `dist/` shipped next to the plugin (a packaging step here only), a Developer ID signature and notarization (builds are ad-hoc signed, enough to load locally), installer, Windows
   (WebView2 options, real-port MIDI) untested. Licence TBA (JUCE is AGPL or commercial).
