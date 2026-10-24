@@ -1,5 +1,6 @@
 #include "EngineHost.h"
 #include "Trace.h"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <cstdlib>
@@ -103,7 +104,7 @@ const std::vector<juce::String>& EngineHost::handledMessageTypes() {
       "set-effect-param", "set-effect-lfo", "set-instrument-lfo", "create-instrument", "remove-instrument",
       "instrument-note-on", "instrument-note-off", "set-instrument-param", "set-transport", "set-sample-regions",
       "set-sample-param", "schedule-params", "cancel-scheduled", "start-capture", "stop-capture", "arm-capture",
-      "configure", "set-midi-route"};
+      "configure", "set-midi-route", "set-sequence"};
   return types;
 }
 
@@ -117,6 +118,7 @@ EngineHost::~EngineHost() {
   while (evts_.pop(e)) {
     if (e.type == EvtType::DisposeEngine) delete static_cast<webdsp::Engine*>(e.p);
     if (e.type == EvtType::DisposeSample) delete static_cast<SamplePayload*>(e.p);
+    if (e.type == EvtType::DisposeSequence) delete static_cast<Sequence*>(e.p);
     if (e.type == EvtType::CaptureComplete) std::free(e.p);
   }
 }
@@ -190,6 +192,7 @@ juce::var EngineHost::buildReady(int maxVoices) {
   return object({{"type", "ready"},
                  {"protocolVersion", kProtocolVersion},
                  {"midiRouting", true},
+                 {"nativeSequence", true},
                  {"sampleRate", sampleRate_},
                  {"outputChannels", kOutputChannels},
                  {"maxVoices", maxVoices},
@@ -467,6 +470,64 @@ void EngineHost::handleMessage(const juce::var& msg) {
       c.f[0] = static_cast<float>(juce::jlimit(0.0, 1.0, num(r, "gain", 1.0)));
     }
     pushCmd(c);
+  } else if (type == "set-sequence") {
+    c.type = CmdType::SetSequence;
+    const juce::var s = msg["sequence"];
+    if (s.isObject() && s["events"].isArray() && num(s, "lengthBeats", 0.0) > 0.0) {
+      auto seq = std::make_unique<Sequence>();
+      seq->lengthBeats = num(s, "lengthBeats", 0.0);
+      seq->events.reserve(static_cast<size_t>(s["events"].size()));
+      for (const auto& e : *s["events"].getArray()) {
+        SeqEvent ev;
+        ev.beat = num(e, "beat", 0.0);
+        if (!(ev.beat >= 0.0 && ev.beat < seq->lengthBeats)) continue;
+        const juce::String kind = e["kind"].toString();
+        ev.durationBeats = has(e, "durationBeats") ? num(e, "durationBeats", -1.0) : -1.0;
+        if (kind == "sample") {
+          ev.kind = 0;
+          ev.id = integer(e, "sample", 0);
+          ev.bus = integer(e, "bus", 0);
+          ev.gain = static_cast<float>(num(e, "gain", 1.0));
+          ev.pan = static_cast<float>(num(e, "pan", 0.0));
+          ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
+          ev.region = has(e, "region") ? integer(e, "region", 0) : -1;
+          ev.loop = flag(e, "loop");
+          ev.chokeGroup = chokeGroupOf(e);
+          ev.mono = flag(e, "mono");
+          ev.track = has(e, "track") ? integer(e, "track", -1) : -1;
+        } else if (kind == "instrument") {
+          ev.kind = 1;
+          ev.id = integer(e, "instrument", 0);
+          ev.gain = static_cast<float>(num(e, "velocity", 1.0));
+          ev.pan = static_cast<float>(num(e, "pan", 0.0));
+          ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
+          ev.chokeGroup = chokeGroupOf(e);
+        } else if (kind == "param") {
+          ev.kind = 2;
+          const juce::var t = e["target"];
+          if (t.hasProperty("effect")) {
+            ev.target = 0;
+            ev.bus = integer(t["effect"], "bus", 0);
+            ev.id = integer(t["effect"], "effect", 0);
+          } else if (t.hasProperty("instrument")) {
+            ev.target = 1;
+            ev.id = integer(t, "instrument", 0);
+          } else if (t.hasProperty("sample")) {
+            ev.target = 2;
+            ev.id = integer(t, "sample", 0);
+          } else continue;
+          ev.param = integer(e, "param", 0);
+          ev.value = static_cast<float>(num(e, "value", 0.0));
+          ev.hasFrom = has(e, "from");
+          ev.from = static_cast<float>(num(e, "from", 0.0));
+          ev.rampBeats = num(e, "rampBeats", 0.0);
+        } else continue;
+        seq->events.push_back(ev);
+      }
+      std::stable_sort(seq->events.begin(), seq->events.end(), [](const SeqEvent& a, const SeqEvent& b) { return a.beat < b.beat; });
+      if (!seq->events.empty()) c.p = seq.release();
+    }
+    pushCmd(c);  // a null pointer clears the sequence
   } else if (type == "configure") {
     c.type = CmdType::ConfigureVoices;
     c.i[0] = integer(msg, "maxVoices", kDefaultMaxVoices);
@@ -496,7 +557,25 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     std::fill(std::begin(heldVoice_), std::end(heldVoice_), 0);
     monoVoice_ = 0;
     lastInstrumentNote_ = -1;
+    if (sequence_) {  // its sample/instrument/effect ids belonged to the old engine; the page sends it again
+      Evt old;
+      old.type = EvtType::DisposeSequence;
+      old.p = sequence_.release();
+      postEvt(old);
+    }
+    std::fill(std::begin(seqTrackVoice_), std::end(seqTrackVoice_), 0);
+    std::fill(std::begin(seqRecentVoices_), std::end(seqRecentVoices_), 0);
+    seqSustainedCount_ = 0;
     if (dispose.p) postEvt(dispose);
+    return;
+  }
+  if (c.type == CmdType::SetSequence) {
+    releaseSequence();
+    Evt old;
+    old.type = EvtType::DisposeSequence;
+    old.p = sequence_.release();
+    sequence_.reset(static_cast<Sequence*>(c.p));
+    if (old.p) postEvt(old);
     return;
   }
   if (c.type == CmdType::LoadSample) {
@@ -708,7 +787,7 @@ void EngineHost::renderFrames(juce::AudioBuffer<float>& buffer, int from, int co
       std::memcpy(buffer.getWritePointer(ch) + at, engine_->outputChannel(ch), sizeof(float) * static_cast<size_t>(chunk));
 
     for (const int32_t voice : engine_->endedVoices()) {
-      if (voice >= kRouteVoiceBase) continue;  // the router's own voices: the page never knew them
+      if (voice >= kSeqVoiceBase) continue;  // the router's and sequence's own voices: the page never knew them
       Evt ev;
       ev.type = EvtType::VoiceEnded;
       ev.a = voice;
@@ -788,6 +867,83 @@ void EngineHost::releaseRouted() {
   monoVoice_ = 0;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Native sequence
+// ---------------------------------------------------------------------------------------------
+
+// Finds the sequence events due in this block and lists them (with their frame inside the block) in due_. The sequence is the DAW
+// timeline's: at host position p it plays the cycle's p mod lengthBeats, delayed by the declared latency so it lines up with the
+// other tracks after plugin delay compensation. A stop or locate releases what is sounding. Allocation-free.
+void EngineHost::runSequence(const HostTimeInfo& host, int numFrames) {
+  dueCount_ = 0;
+  const bool playing = host.valid && host.playing && sequence_ && engine_ && host.bpm > 0.0;
+  if (!playing) {
+    if (seqWasPlaying_) releaseSequence();
+    seqWasPlaying_ = false;
+    return;
+  }
+  const double bpm = host.bpm;
+  const double beatsPerFrame = bpm / 60.0 / sampleRate_;
+  const double latencyBeats = kHostLatencySeconds * bpm / 60.0;
+  const double start = host.ppq - latencyBeats;
+  const double end = start + numFrames * beatsPerFrame;
+  if (seqWasPlaying_ && std::fabs(host.ppq - seqExpectedPpq_) > 0.02) releaseSequence();  // a locate or a loop wrap
+  seqWasPlaying_ = true;
+  seqExpectedPpq_ = host.ppq + numFrames * beatsPerFrame;
+  dueBpm_ = bpm;
+
+  const Sequence& s = *sequence_;
+  const double length = s.lengthBeats;
+  for (int64_t cycle = static_cast<int64_t>(std::floor(juce::jmax(start, 0.0) / length)); cycle * length < end; cycle++) {
+    const double base = static_cast<double>(cycle) * length;
+    const double from = juce::jmax(start, 0.0) - base;
+    auto it = std::lower_bound(s.events.begin(), s.events.end(), from, [](const SeqEvent& e, double b) { return e.beat < b; });
+    for (; it != s.events.end() && base + it->beat < end; ++it) {
+      if (dueCount_ >= kMaxDuePerBlock) return;  // a pathological block: the rest are dropped rather than allocating
+      const int at = juce::jlimit(0, numFrames - 1, static_cast<int>((base + it->beat - start) / beatsPerFrame));
+      due_[dueCount_++] = {at, &*it};
+    }
+  }
+}
+
+// Plays one due sequence event (immediate engine calls: the caller has rendered up to its frame).
+void EngineHost::applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame) {
+  const double secondsPerBeat = 60.0 / bpm;
+  auto frames = [&](double beats) { return beats > 0.0 ? static_cast<int32_t>(juce::jmin(beats * secondsPerBeat * sampleRate_, 2.0e9)) : -1; };
+  if (e.kind == 0) {
+    const int32_t voice = nextSeqVoice_;
+    nextSeqVoice_ = nextSeqVoice_ >= (1 << 30) - 2 ? kSeqVoiceBase : nextSeqVoice_ + 1;
+    const bool tracked = e.mono && e.track >= 0 && e.track < kSeqTracks;
+    if (tracked && seqTrackVoice_[e.track] != 0) engine_->release(seqTrackVoice_[e.track]);
+    const float rate = e.region >= 0 || e.pitch == 0.0f ? 1.0f : std::exp2(e.pitch / 12.0f);  // a cue region never transposes
+    engine_->trigger(voice, e.id, e.bus, e.gain, rate, 0, -1, e.loop, false, frames(e.durationBeats), e.pan, e.region, e.chokeGroup);
+    if (tracked) seqTrackVoice_[e.track] = voice;
+    seqRecentVoices_[seqRecentNext_] = voice;
+    seqRecentNext_ = (seqRecentNext_ + 1) % 256;
+  } else if (e.kind == 1) {
+    engine_->instrumentNoteOn(e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup);
+    if (e.durationBeats > 0.0 && seqSustainedCount_ < kSeqSustained) {
+      bool known = false;
+      for (int i = 0; i < seqSustainedCount_; i++) known = known || seqSustained_[i] == e.id;
+      if (!known) seqSustained_[seqSustainedCount_++] = e.id;
+    }
+  } else {
+    const int32_t ramp = e.rampBeats > 0.0 ? juce::jmax(0, frames(e.rampBeats)) : 0;
+    engine_->scheduleParam({frame, e.target, e.bus, e.id, e.param, e.value, e.from, e.hasFrom, ramp});
+  }
+}
+
+void EngineHost::releaseSequence() {
+  if (!engine_) return;
+  for (int i = 0; i < 256; i++) {
+    if (seqRecentVoices_[i] != 0) engine_->release(seqRecentVoices_[i]);
+    seqRecentVoices_[i] = 0;
+  }
+  for (int i = 0; i < kSeqTracks; i++) seqTrackVoice_[i] = 0;
+  for (int i = 0; i < seqSustainedCount_; i++) engine_->instrumentNoteOff(seqSustained_[i]);
+  seqSustainedCount_ = 0;
+}
+
 void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& host, const juce::MidiBuffer& midi) {
   const int numFrames = buffer.getNumSamples();
   const int64_t blockStart = frame_.load(std::memory_order_relaxed);
@@ -796,21 +952,36 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
   while (cmds_.pop(cmd)) applyCmd(cmd, blockStart);
   trackTransport(host, blockStart, numFrames);
   forwardMidi(midi, blockStart);
+  runSequence(host, numFrames);
 
   buffer.clear();
   if (engine_) {
     const int outChannels = juce::jmin(buffer.getNumChannels(), engine_->outputChannels());
     int done = 0;
-    if (route_.active) {
-      // Render up to each MIDI event, then play it (immediate calls take effect at the start of the next render), so a note
-      // lands on its own sample and a note-off can never overtake its note-on.
-      for (const auto metadata : midi) {
-        const int at = juce::jlimit(0, numFrames, metadata.samplePosition);
+    if (route_.active || dueCount_ > 0) {
+      // Render up to each MIDI or sequence event in time order, then play it (immediate calls take effect at the start of the next
+      // render), so a note lands on its own sample and a note-off or mono release can never overtake its note-on.
+      auto midiIt = midi.begin();
+      int dueIdx = 0;
+      for (;;) {
+        const bool haveMidi = route_.active && midiIt != midi.end();
+        const bool haveDue = dueIdx < dueCount_;
+        if (!haveMidi && !haveDue) break;
+        const int midiAt = haveMidi ? juce::jlimit(0, numFrames, (*midiIt).samplePosition) : numFrames + 1;
+        const int dueAt = haveDue ? due_[dueIdx].at : numFrames + 1;
+        const int at = juce::jmin(midiAt, dueAt);
         if (at > done) {
           renderFrames(buffer, done, at - done, blockStart, outChannels);
           done = at;
         }
-        applyRoutedMidi(metadata.data, metadata.numBytes);
+        if (dueAt <= midiAt) {
+          applySequenceEvent(*due_[dueIdx].event, dueBpm_, blockStart + at);
+          dueIdx++;
+        } else {
+          const auto metadata = *midiIt;
+          applyRoutedMidi(metadata.data, metadata.numBytes);
+          ++midiIt;
+        }
       }
     }
     renderFrames(buffer, done, numFrames - done, blockStart, outChannels);
@@ -867,6 +1038,7 @@ void EngineHost::timerCallback() {
       }
       case EvtType::DisposeEngine: delete static_cast<webdsp::Engine*>(ev.p); break;
       case EvtType::DisposeSample: delete static_cast<SamplePayload*>(ev.p); break;
+      case EvtType::DisposeSequence: delete static_cast<Sequence*>(ev.p); break;
       case EvtType::HostTransport: {
         const bool playing = (ev.a & 1) != 0, loopOn = (ev.a & 2) != 0, hasSig = (ev.a & 4) != 0;
         juce::var event = object(

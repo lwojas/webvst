@@ -53,6 +53,15 @@ how those repos build.
 - **The rule that avoids double notes:** the page plays notes itself only when `capabilities.midiRouting` is false. A plugin reports it true
   (`ready.midiRouting`), so the clients declare a route and do not audition MIDI notes from the page.
 
+## Native sequence
+
+An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence()`, see webdsp `docs/native-sequence.md`). `EngineHost` then plays it itself, on the audio thread, against the DAW's transport: each block it finds the events in that block's slice of the timeline (`ppq mod lengthBeats`, shifted by the declared latency so it lines up after plugin delay compensation), and plays them between render segments split at their frames, merged in time order with routed MIDI. So it is sample-accurate, follows locates, loops and tempo, keeps playing with the editor closed and renders in an offline bounce.
+
+- The sequence arrives as one `set-sequence` message, is built into plain structs on the message thread and swapped in by pointer (the old one is freed on the message thread through a dispose event), so the audio thread allocates nothing.
+- Voices it starts use ids from `1<<29` up and are never reported to the page. A stop or locate releases what is sounding. A mono track releases its previous voice at the next event's frame.
+- A replaced engine (the page reloading) drops the sequence, because its ids belonged to the old engine; the app declares it again.
+- Limits: tempo is read once per block; a locate inside a block is noticed at the next; at most 1024 events fire in one block.
+
 ## What crosses the bridge (the `"webvst"` event channel)
 
 | Direction | Messages | Contract |
