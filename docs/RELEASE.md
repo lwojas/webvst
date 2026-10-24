@@ -5,7 +5,7 @@ the machine that built them). Nothing below is implemented yet. This is the work
 
 ## 1. Ship the clients inside the plugin
 
-Now: `WEBVST_URL_<APP>` / `WEBVST_URL`, defaulting to `http://localhost:5174` (WebSeq) and `:5175` (WebTracker).
+Now: `WEBVST_URL_<APP>` / `WEBVST_URL`, defaulting to the GitHub Pages builds (`https://lwojas.github.io/webseq/`, `.../webtrack/`); dev servers are `http://localhost:5174` / `:5175`.
 
 - Build each client (`npm run build` in webseq / webtracker) and copy its `dist/` into the bundle (a CMake packaging step
   here only; the clients stay unchanged and standalone). Pin the client commit like `third_party/webdsp` is pinned, so a

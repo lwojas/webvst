@@ -110,7 +110,8 @@ node --test test/                                  # the shim against the real w
 ## Day to day
 
 - **Develop a client or webdsp as usual**, in the browser. To see it in the plugin, run the client's dev server and load
-  its plugin (WebSeq opens `http://localhost:5174`, WebTracker `http://localhost:5175`; `WEBVST_URL_WEBSEQ` /
+  its plugin with the URL overridden (plugins default to `https://lwojas.github.io/webseq/` and `.../webtrack/`; dev servers are
+  WebSeq `http://localhost:5174`, WebTracker `http://localhost:5175`; `WEBVST_URL_WEBSEQ` /
   `WEBVST_URL_WEBTRACKER` in the host's environment override one plugin, `WEBVST_URL` any plugin without its own). Restart the dev
   server after changing the `webdsp` dependency (Vite caches it).
 - **Ableton Live does not list the plugin, though REAPER does?** Look in `~/Library/Preferences/Ableton/Live <version>/PluginScanner.txt`

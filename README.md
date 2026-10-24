@@ -69,6 +69,6 @@ the round trip against the real clients.
 
 ## Client URL
 
-Each plugin opens its client's dev server by default: WebSeq `http://localhost:5174`, WebTracker `http://localhost:5175` (each
-client's `npm run dev`). Override in the host process's environment: `WEBVST_URL_WEBSEQ` / `WEBVST_URL_WEBTRACKER` for one plugin,
+Each plugin opens its hosted client by default: WebSeq `https://lwojas.github.io/webseq/`, WebTracker `https://lwojas.github.io/webtrack/`.
+For development, point at a client's dev server (`npm run dev`: WebSeq `http://localhost:5174`, WebTracker `http://localhost:5175`). Override in the host process's environment: `WEBVST_URL_WEBSEQ` / `WEBVST_URL_WEBTRACKER` for one plugin,
 or `WEBVST_URL` for any plugin without its own variable.

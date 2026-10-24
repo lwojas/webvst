@@ -78,9 +78,10 @@ function(webvst_add_plugin target)
   endif()
 endfunction()
 
-# Default URLs are each client's Vite dev server (webseq 5174, webtracker 5175).
-webvst_add_plugin(WebSeq PRODUCT "WebSeq" CODE Wsqr APP_ID webseq DEFAULT_URL "http://localhost:5174")
-webvst_add_plugin(WebTracker PRODUCT "WebTracker" CODE Wtrk APP_ID webtracker DEFAULT_URL "http://localhost:5175")
+# Default URLs are the clients hosted on GitHub Pages. For local development point at a dev server with
+# WEBVST_URL_WEBSEQ / WEBVST_URL_WEBTRACKER (e.g. http://localhost:5174 / :5175).
+webvst_add_plugin(WebSeq PRODUCT "WebSeq" CODE Wsqr APP_ID webseq DEFAULT_URL "https://lwojas.github.io/webseq/")
+webvst_add_plugin(WebTracker PRODUCT "WebTracker" CODE Wtrk APP_ID webtracker DEFAULT_URL "https://lwojas.github.io/webtrack/")
 
 # Headless test of EngineHost (command queue, dispatcher, events, allocation behaviour): -DWEBVST_BUILD_TESTS=ON
 option(WEBVST_BUILD_TESTS "Build the EngineHost test executable" OFF)
