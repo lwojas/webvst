@@ -104,7 +104,7 @@ const std::vector<juce::String>& EngineHost::handledMessageTypes() {
       "set-effect-param", "set-effect-lfo", "set-instrument-lfo", "create-instrument", "remove-instrument",
       "instrument-note-on", "instrument-note-off", "set-instrument-param", "set-transport", "set-sample-regions",
       "set-sample-param", "schedule-params", "cancel-scheduled", "start-capture", "stop-capture", "arm-capture",
-      "configure", "set-midi-route", "set-sequence"};
+      "configure", "set-midi-route", "set-sequence", "set-analysis-tap"};
   return types;
 }
 
@@ -328,6 +328,11 @@ void EngineHost::handleMessage(const juce::var& msg) {
     c.i[0] = integer(msg, "bus", 0);
     c.i[1] = integer(msg, "effect", 0);
     c.i[2] = flag(msg, "enabled");
+    pushCmd(c);
+  } else if (type == "set-analysis-tap") {
+    c.type = CmdType::AnalysisTap;
+    c.i[0] = integer(msg, "bus", 0);
+    c.i[1] = integer(msg, "effect", 0);
     pushCmd(c);
   } else if (type == "set-effect-param") {
     c.type = CmdType::FxParam;
@@ -623,6 +628,13 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     case CmdType::FxRemove: e.removeEffect(c.i[0], c.i[1]); break;
     case CmdType::FxMove: e.moveEffect(c.i[0], c.i[1], c.i[2]); break;
     case CmdType::FxEnabled: e.setEffectEnabled(c.i[0], c.i[1], c.i[2] != 0); break;
+    case CmdType::AnalysisTap:
+      analysisActive_ = e.setAnalysisTap(c.i[0], c.i[1]) && c.i[1] != 0;
+      if (!analysisActive_) e.setAnalysisTap(c.i[0], 0);
+      analysisBus_ = c.i[0];
+      analysisEffect_ = analysisActive_ ? c.i[1] : 0;
+      analysisLastWritten_ = 0;
+      break;
     case CmdType::FxParam: e.setEffectParam(c.i[0], c.i[1], c.i[2], c.f[0]); break;
     case CmdType::FxLfo:
       if (!e.setEffectLfo(c.i[0], c.i[1], c.i[2], lfoConfig(c.i, c.f)) && c.i[3]) error(kErrEffectLfo, c.i[1], c.i[7]);
@@ -1012,6 +1024,24 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
       metersWereActive_ = active;
     }
 
+    framesSinceAnalysis_ += numFrames;
+    if (framesSinceAnalysis_ >= webdsp::kAnalysisWindow) {
+      framesSinceAnalysis_ = 0;
+      if (analysisActive_ && engine_->analysisWritten() != analysisLastWritten_) {
+        analysisLastWritten_ = engine_->analysisWritten();
+        const float* snap = engine_->analysisSnapshot();
+        const uint32_t seq = analysisSeq_.load(std::memory_order_relaxed);
+        analysisSeq_.store(seq + 1, std::memory_order_release);
+        std::copy(snap, snap + webdsp::kAnalysisWindow, analysisBuf_.begin());
+        analysisSeq_.store(seq + 2, std::memory_order_release);
+        Evt ev;
+        ev.type = EvtType::Analysis;
+        ev.a = analysisBus_;
+        ev.b = analysisEffect_;
+        postEvt(ev);
+      }
+    }
+
     framesSinceDiagnostics_ += numFrames;
     if (framesSinceDiagnostics_ >= kDiagnosticsIntervalFrames) {
       framesSinceDiagnostics_ = 0;
@@ -1069,6 +1099,18 @@ void EngineHost::timerCallback() {
         juce::Array<juce::var> peaks;
         for (float p : ev.peaks) peaks.add(static_cast<double>(p));
         send(object({{"type", "meters"}, {"peaks", peaks}}));
+        break;
+      }
+      case EvtType::Analysis: {
+        // Seqlock read: skip the event if the audio thread was mid-write (the next one follows in ~43 ms).
+        const uint32_t s1 = analysisSeq_.load(std::memory_order_acquire);
+        std::array<float, webdsp::kAnalysisWindow> copy = analysisBuf_;
+        if ((s1 & 1) == 0 && analysisSeq_.load(std::memory_order_acquire) == s1) {
+          juce::Array<juce::var> samples;
+          samples.ensureStorageAllocated(webdsp::kAnalysisWindow);
+          for (float v : copy) samples.add(static_cast<double>(v));
+          send(object({{"type", "analysis"}, {"bus", ev.a}, {"effect", ev.b}, {"samples", samples}}));
+        }
         break;
       }
       case EvtType::CaptureComplete: {

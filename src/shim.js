@@ -480,6 +480,8 @@
       onClock(event.clockFrame, event.sampleRate);
     } else if (event.type === 'meters') {
       event.peaks = Float32Array.from(event.peaks);
+    } else if (event.type === 'analysis') {
+      event.samples = Float32Array.from(event.samples);
     } else if (event.type === 'capture-complete') {
       event.channelData = event.channelData.map(base64ToBuffer);
     }

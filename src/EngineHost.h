@@ -1,4 +1,5 @@
 #pragma once
+#include <array>
 #include <atomic>
 #include <functional>
 #include <memory>
@@ -77,7 +78,7 @@ class EngineHost : private juce::Timer {
     SwapEngine, LoadSample, RemoveSample, Trigger, ScheduleEvent, Release, Stop, VoiceParam, BusParam,
     FxAdd, FxRemove, FxMove, FxEnabled, FxParam, FxLfo, InstCreate, InstRemove, InstNoteOn, InstNoteOff,
     InstParam, InstLfo, Transport, ClearRegions, AddRegion, SampleParam, ScheduleParam, CancelScheduled,
-    StartCapture, StopCapture, ArmCapture, ConfigureVoices, SetMidiRoute, SetSequence
+    StartCapture, StopCapture, ArmCapture, ConfigureVoices, SetMidiRoute, SetSequence, AnalysisTap
   };
 
   // Field use per type is documented where the message thread fills it (EngineHost.cpp, handleMessage).
@@ -89,7 +90,7 @@ class EngineHost : private juce::Timer {
     void* p = nullptr;
   };
 
-  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport, Midi, DisposeSequence };
+  enum class EvtType : uint8_t { VoiceEnded, Meters, Diagnostics, CaptureComplete, Error, DisposeEngine, DisposeSample, HostTransport, Midi, DisposeSequence, Analysis };
   enum ErrorCode : int32_t { kErrAddEffect = 1, kErrCreateInstrument, kErrEffectLfo, kErrInstrumentLfo, kErrArmCapture, kErrQueueFull };
 
   struct Evt {
@@ -223,7 +224,15 @@ class EngineHost : private juce::Timer {
 
   // audio thread state
   std::unordered_map<int32_t, int32_t> armedCaptures_;  // captureId -> result sample id
-  int32_t framesSinceMeters_ = 0, framesSinceDiagnostics_ = 0;
+  int32_t framesSinceMeters_ = 0, framesSinceDiagnostics_ = 0, framesSinceAnalysis_ = 0;
+  // Spectrum tap (webdsp "analysis" events): the audio thread copies the engine's latest window into
+  // analysisBuf_ under a seqlock (odd = being written) and posts a small Analysis event; the message
+  // thread reads it back and sends the samples. Only the audio thread touches the tap state.
+  bool analysisActive_ = false;
+  uint32_t analysisLastWritten_ = 0;
+  int32_t analysisBus_ = 0, analysisEffect_ = 0;
+  std::atomic<uint32_t> analysisSeq_{0};
+  std::array<float, webdsp::kAnalysisWindow> analysisBuf_{};
   bool metersWereActive_ = false;
 
   juce::CriticalSection sinkLock_;

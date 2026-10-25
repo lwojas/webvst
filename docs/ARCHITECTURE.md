@@ -69,6 +69,7 @@ An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence
 | --- | --- | --- |
 | page → plugin | every `HostCommand` (`trigger`, `schedule`, `create-instrument`, ...), plus `__init`, `sample-begin/chunk/end` (the shim splits `load-sample`) | webdsp `src/runtime/commandProtocol.ts`; `EngineHost::handledMessageTypes()` |
 | plugin → page | every `WorkletEvent` (`ready`, `meters`, `voice-ended`, `capture-complete`, ...), `error` | same; `ready.protocolVersion` |
+| plugin → page | `analysis` (spectrum tap: the latest 2048 mono samples entering the tapped effect, ~23/s, only while `set-analysis-tap` is set; copied on the audio thread under a seqlock, sent from the message thread) | webdsp `docs/spectrum.md` |
 | plugin → page | `host-transport` (mapping of the DAW's beat to engine time, tempo, loop, epoch) | webdsp `docs/host-transport.md` |
 | plugin → page | `midi` (channel messages with engine times) | surfaced as a Web MIDI input (for note entry, CCs, learn) |
 | page → plugin | `set-midi-route` (what a key plays) | webdsp `docs/midi-routing.md`; the plugin plays notes itself, see below |
