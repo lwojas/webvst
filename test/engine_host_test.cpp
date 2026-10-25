@@ -180,10 +180,11 @@ int main() {
     }
     CHECK(worst == 0, "steady-state blocks allocate nothing on the audio thread (worst %ld)", worst);
 
-    // Spectrum tap: tap the input of an EQ on the master bus; the page gets labelled "analysis" windows,
-    // and the audio thread still allocates nothing while it feeds them.
+    // Spectrum taps: the input and the output of an EQ on the master bus (two slots); the page gets
+    // labelled "analysis" windows for each, and the audio thread allocates nothing while feeding them.
     r.host.handleMessage(parse(R"({"type":"add-effect","bus":0,"effect":5,"kind":10,"index":-1})"));
-    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","bus":0,"effect":5})"));
+    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","slot":0,"bus":0,"effect":5,"post":false})"));
+    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","slot":1,"bus":0,"effect":5,"post":true})"));
     r.block();  // applies the commands (adding the effect builds its node, which allocates by design)
     long tapWorst = 0;
     for (int i = 0; i < 60; i++) {
@@ -192,18 +193,21 @@ int main() {
       tapWorst = std::max(tapWorst, g_allocs.load());
     }
     r.pump();
-    const juce::var* an = r.first("analysis");
-    CHECK(an != nullptr, "an analysis tap produces analysis events");
-    if (an) {
-      CHECK((*an)["samples"].size() == 2048, "an analysis event carries a 2048-sample window (got %d)", (*an)["samples"].size());
-      CHECK(static_cast<int>((*an)["bus"]) == 0 && static_cast<int>((*an)["effect"]) == 5, "the event names its bus and effect");
+    bool slot0 = false, slot1 = false, sized = true;
+    for (auto& e : r.events) {
+      if (e["type"].toString() != "analysis") continue;
+      sized = sized && e["samples"].size() == 2048;
+      (static_cast<int>(e["slot"]) == 0 ? slot0 : slot1) = true;
     }
-    CHECK(tapWorst == 0, "feeding the analysis tap allocates nothing on the audio thread (worst %ld)", tapWorst);
+    CHECK(sized, "every analysis event carries a 2048-sample window");
+    CHECK(slot0 && slot1, "both tap slots produce analysis events");
+    CHECK(tapWorst == 0, "feeding the analysis taps allocates nothing on the audio thread (worst %ld)", tapWorst);
     r.events.clear();
-    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","bus":0,"effect":0})"));
+    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","slot":0,"bus":0,"effect":0,"post":false})"));
+    r.host.handleMessage(parse(R"({"type":"set-analysis-tap","slot":1,"bus":0,"effect":0,"post":false})"));
     for (int i = 0; i < 60; i++) r.block();
     r.pump();
-    CHECK(r.count("analysis") == 0, "no analysis events once the tap is off");
+    CHECK(r.count("analysis") == 0, "no analysis events once the taps are off");
 
     // Per-command allocation on the audio thread, after the engine's warm-up.
     struct Case { const char* name; const char* json; };

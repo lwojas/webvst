@@ -331,8 +331,10 @@ void EngineHost::handleMessage(const juce::var& msg) {
     pushCmd(c);
   } else if (type == "set-analysis-tap") {
     c.type = CmdType::AnalysisTap;
-    c.i[0] = integer(msg, "bus", 0);
-    c.i[1] = integer(msg, "effect", 0);
+    c.i[0] = integer(msg, "slot", 0);
+    c.i[1] = integer(msg, "bus", 0);
+    c.i[2] = integer(msg, "effect", 0);
+    c.i[3] = flag(msg, "post");
     pushCmd(c);
   } else if (type == "set-effect-param") {
     c.type = CmdType::FxParam;
@@ -629,11 +631,12 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     case CmdType::FxMove: e.moveEffect(c.i[0], c.i[1], c.i[2]); break;
     case CmdType::FxEnabled: e.setEffectEnabled(c.i[0], c.i[1], c.i[2] != 0); break;
     case CmdType::AnalysisTap:
-      analysisActive_ = e.setAnalysisTap(c.i[0], c.i[1]) && c.i[1] != 0;
-      if (!analysisActive_) e.setAnalysisTap(c.i[0], 0);
-      analysisBus_ = c.i[0];
-      analysisEffect_ = analysisActive_ ? c.i[1] : 0;
-      analysisLastWritten_ = 0;
+      if (c.i[0] >= 0 && c.i[0] < kTapSlots) {
+        const bool ok = e.setAnalysisTap(c.i[0], c.i[1], c.i[2], c.i[3] != 0);
+        if (!ok) e.setAnalysisTap(c.i[0], 0, 0, false);
+        analysisActive_[static_cast<size_t>(c.i[0])] = ok && c.i[2] != 0;
+        analysisLastWritten_[static_cast<size_t>(c.i[0])] = 0;
+      }
       break;
     case CmdType::FxParam: e.setEffectParam(c.i[0], c.i[1], c.i[2], c.f[0]); break;
     case CmdType::FxLfo:
@@ -1027,17 +1030,18 @@ void EngineHost::process(juce::AudioBuffer<float>& buffer, const HostTimeInfo& h
     framesSinceAnalysis_ += numFrames;
     if (framesSinceAnalysis_ >= webdsp::kAnalysisWindow) {
       framesSinceAnalysis_ = 0;
-      if (analysisActive_ && engine_->analysisWritten() != analysisLastWritten_) {
-        analysisLastWritten_ = engine_->analysisWritten();
-        const float* snap = engine_->analysisSnapshot();
-        const uint32_t seq = analysisSeq_.load(std::memory_order_relaxed);
-        analysisSeq_.store(seq + 1, std::memory_order_release);
-        std::copy(snap, snap + webdsp::kAnalysisWindow, analysisBuf_.begin());
-        analysisSeq_.store(seq + 2, std::memory_order_release);
+      for (int slot = 0; slot < kTapSlots; slot++) {
+        const auto k = static_cast<size_t>(slot);
+        if (!analysisActive_[k] || engine_->analysisWritten(slot) == analysisLastWritten_[k]) continue;
+        analysisLastWritten_[k] = engine_->analysisWritten(slot);
+        const float* snap = engine_->analysisSnapshot(slot);
+        const uint32_t seq = analysisSeq_[k].load(std::memory_order_relaxed);
+        analysisSeq_[k].store(seq + 1, std::memory_order_release);
+        std::copy(snap, snap + webdsp::kAnalysisWindow, analysisBuf_[k].begin());
+        analysisSeq_[k].store(seq + 2, std::memory_order_release);
         Evt ev;
         ev.type = EvtType::Analysis;
-        ev.a = analysisBus_;
-        ev.b = analysisEffect_;
+        ev.a = slot;
         postEvt(ev);
       }
     }
@@ -1103,13 +1107,14 @@ void EngineHost::timerCallback() {
       }
       case EvtType::Analysis: {
         // Seqlock read: skip the event if the audio thread was mid-write (the next one follows in ~43 ms).
-        const uint32_t s1 = analysisSeq_.load(std::memory_order_acquire);
-        std::array<float, webdsp::kAnalysisWindow> copy = analysisBuf_;
-        if ((s1 & 1) == 0 && analysisSeq_.load(std::memory_order_acquire) == s1) {
+        const auto k = static_cast<size_t>(ev.a);
+        const uint32_t s1 = analysisSeq_[k].load(std::memory_order_acquire);
+        std::array<float, webdsp::kAnalysisWindow> copy = analysisBuf_[k];
+        if ((s1 & 1) == 0 && analysisSeq_[k].load(std::memory_order_acquire) == s1) {
           juce::Array<juce::var> samples;
           samples.ensureStorageAllocated(webdsp::kAnalysisWindow);
           for (float v : copy) samples.add(static_cast<double>(v));
-          send(object({{"type", "analysis"}, {"bus", ev.a}, {"effect", ev.b}, {"samples", samples}}));
+          send(object({{"type", "analysis"}, {"slot", ev.a}, {"samples", samples}}));
         }
         break;
       }

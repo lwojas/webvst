@@ -225,15 +225,15 @@ class EngineHost : private juce::Timer {
   // audio thread state
   std::unordered_map<int32_t, int32_t> armedCaptures_;  // captureId -> result sample id
   int32_t framesSinceMeters_ = 0, framesSinceDiagnostics_ = 0, framesSinceAnalysis_ = 0;
-  // Spectrum tap (webdsp "analysis" events): the audio thread copies the engine's latest window into
-  // analysisBuf_ under a seqlock (odd = being written) and posts a small Analysis event; the message
-  // thread reads it back and sends the samples. Only the audio thread touches the tap state.
-  bool analysisActive_ = false;
-  uint32_t analysisLastWritten_ = 0;
-  int32_t analysisBus_ = 0, analysisEffect_ = 0;
-  std::atomic<uint32_t> analysisSeq_{0};
-  std::array<float, webdsp::kAnalysisWindow> analysisBuf_{};
   bool metersWereActive_ = false;
+  // Spectrum taps (webdsp "analysis" events): per slot, the audio thread copies the engine's latest window
+  // into analysisBuf_[slot] under a seqlock (odd = being written) and posts a small Analysis event; the
+  // message thread reads it back and sends the samples. Only the audio thread touches the other state.
+  static constexpr int kTapSlots = webdsp::kMaxAnalysisTaps;
+  std::array<bool, kTapSlots> analysisActive_{};
+  std::array<uint32_t, kTapSlots> analysisLastWritten_{};
+  std::array<std::atomic<uint32_t>, kTapSlots> analysisSeq_{};
+  std::array<std::array<float, webdsp::kAnalysisWindow>, kTapSlots> analysisBuf_{};
 
   juce::CriticalSection sinkLock_;
 };
