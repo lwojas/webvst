@@ -202,12 +202,16 @@ class EngineHost : private juce::Timer {
   bool seqWasPlaying_ = false;
   double seqGridBpm_ = 0.0;
   double seqExpectedPpq_ = 0.0;
+  // Instrument notes are handed to the engine one block ahead (so it can fade a sounding note out before the next one
+  // starts, see webdsp docs/adsr-envelope.md). Song beat (cycles counted) before which that has already been done.
+  double seqScheduledBeat_ = 0.0;
   DueEvent due_[kMaxDuePerBlock];
   int dueCount_ = 0;
   double dueBpm_ = 120.0;
   void runSequence(const HostTimeInfo& host, int numFrames, int64_t blockStart);
   void applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame);
-  void releaseSequence();
+  void noteSequenceInstrument(const SeqEvent& e);
+  void releaseSequence(int64_t fromFrame);
 
   // audio thread state: host transport tracking
   bool lastPlaying_ = false, lastLoopOn_ = false;

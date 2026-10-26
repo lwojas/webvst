@@ -999,6 +999,51 @@ int main() {
       CHECK(diff > 0.02f, "a sequence event's tie reaches the engine (max difference %.3f)", diff);
     }
 
+    {  // instrument notes are handed to the engine a block ahead: abutting notes are faded out before the next one starts, and a locate withdraws them
+      auto play = [&](const char* seq, double ppq0, int blocks, int locateAtBlock, double locatePpq) {
+        Rig r;
+        r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+        r.block();
+        r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":5,"bus":0})"));  // Bass
+        r.block();
+        setSeq(r, seq);
+        r.block();
+        r.hostInfo.valid = true;
+        r.hostInfo.playing = true;
+        r.hostInfo.bpm = 120.0;
+        std::vector<float> out;
+        double ppq = ppq0;
+        for (int b = 0; b < blocks; b++) {
+          if (b == locateAtBlock) ppq = locatePpq;
+          r.hostInfo.ppq = ppq;
+          r.block();
+          const float* d = r.buf.getReadPointer(0);
+          out.insert(out.end(), d, d + kBlock);
+          ppq += kBlock / kSr * 2.0;
+        }
+        return std::make_pair(out, r.host.latencySamples());
+      };
+      // Two bass notes, the first held right up to the second (beat 1): at the seam the first has faded to silence.
+      for (double shift : {0.0, 0.0007, 0.0013, 0.0029, 0.0041}) {
+        const auto [out, latency] = play(R"({"lengthBeats":4,"events":[{"beat":0,"kind":"instrument","instrument":1,"durationBeats":1},{"beat":1,"kind":"instrument","instrument":1,"durationBeats":1}]})", shift, 200, -1, 0.0);
+        const size_t seam = static_cast<size_t>((1.0 - shift) * 24000.0 + latency);
+        float tail = 0.0f;
+        for (size_t i = seam - 24; i < seam; i++) tail = std::max(tail, std::fabs(out[i]));
+        CHECK(tail < 0.02f, "abutting notes: the first is faded out by the second's frame (shift %.4f, tail peak %.4f)", shift, tail);
+      }
+      // A locate right before a note that was already scheduled ahead: that note must not sound.
+      const char* locSeq = R"({"lengthBeats":8,"events":[{"beat":2,"kind":"instrument","instrument":1,"durationBeats":1}]})";
+      const auto [kept, l1] = play(locSeq, 2.0, 120, -1, 0.0);
+      float keptPeak = 0.0f;
+      for (float v : kept) keptPeak = std::max(keptPeak, std::fabs(v));
+      CHECK(keptPeak > 0.01f, "without a locate the note sounds (peak %.3f)", keptPeak);
+      const auto [cut, l2] = play(locSeq, 2.0, 120, static_cast<int>(0.1 * kSr / kBlock), 3.5);  // the block holding the note: beat 2 is 0.1 s (the latency) after the first block
+      float cutPeak = 0.0f;
+      for (float v : cut) cutPeak = std::max(cutPeak, std::fabs(v));
+      CHECK(cutPeak == 0.0f, "a locate withdraws the notes already scheduled ahead (peak %.3f)", cutPeak);
+      (void)l1; (void)l2;
+    }
+
     {  // no allocation on the audio thread, none of the sequence's voices reach the page, a swapped engine drops it
       Rig r;
       r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32})"));

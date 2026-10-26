@@ -575,11 +575,13 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     std::fill(std::begin(seqTrackVoice_), std::end(seqTrackVoice_), 0);
     std::fill(std::begin(seqRecentVoices_), std::end(seqRecentVoices_), 0);
     seqSustainedCount_ = 0;
+    seqScheduledBeat_ = -1.0e300;  // the new engine's queue is empty
     if (dispose.p) postEvt(dispose);
     return;
   }
   if (c.type == CmdType::SetSequence) {
-    releaseSequence();
+    releaseSequence(frame_.load(std::memory_order_relaxed));
+    seqScheduledBeat_ = -1.0e300;  // a new sequence: nothing of it is with the engine yet
     Evt old;
     old.type = EvtType::DisposeSequence;
     old.p = sequence_.release();
@@ -895,7 +897,7 @@ void EngineHost::runSequence(const HostTimeInfo& host, int numFrames, int64_t bl
   dueCount_ = 0;
   const bool playing = host.valid && host.playing && sequence_ && engine_ && host.bpm > 0.0;
   if (!playing) {
-    if (seqWasPlaying_) releaseSequence();
+    if (seqWasPlaying_) releaseSequence(blockStart);
     seqWasPlaying_ = false;
     return;
   }
@@ -905,24 +907,44 @@ void EngineHost::runSequence(const HostTimeInfo& host, int numFrames, int64_t bl
   const double start = host.ppq - latencyBeats;
   const double end = start + numFrames * beatsPerFrame;
   const bool locate = seqWasPlaying_ && std::fabs(host.ppq - seqExpectedPpq_) > 0.02;
-  if (locate) releaseSequence();  // a locate or a loop wrap
+  if (locate) releaseSequence(blockStart);  // a locate or a loop wrap
   if (!seqWasPlaying_ || locate || std::fabs(bpm - seqGridBpm_) > 1.0e-6) {
     // Tempo-aware synths (Pulse's pump) lock to the engine's beat grid: anchor it where the song's beat 0 is, at the DAW's tempo.
     const double anchor = static_cast<double>(blockStart) - start * 60.0 / bpm * sampleRate_;
     engine_->scheduleTransport(blockStart, anchor, bpm);
     seqGridBpm_ = bpm;
   }
+  if (!seqWasPlaying_ || locate) seqScheduledBeat_ = start;  // nothing is ahead of a fresh start
   seqWasPlaying_ = true;
   seqExpectedPpq_ = host.ppq + numFrames * beatsPerFrame;
   dueBpm_ = bpm;
 
   const Sequence& s = *sequence_;
   const double length = s.lengthBeats;
-  for (int64_t cycle = static_cast<int64_t>(std::floor(juce::jmax(start, 0.0) / length)); cycle * length < end; cycle++) {
+  // Instrument notes of the coming block are scheduled now, a block ahead; everything else (and any note that was not
+  // scheduled ahead, e.g. after a locate or when the block size grew) plays in its own block.
+  const double scheduledBefore = seqScheduledBeat_;
+  const double lookEnd = end + numFrames * beatsPerFrame;
+  seqScheduledBeat_ = lookEnd;
+  for (int64_t cycle = static_cast<int64_t>(std::floor(juce::jmax(start, 0.0) / length)); cycle * length < lookEnd; cycle++) {
     const double base = static_cast<double>(cycle) * length;
     const double from = juce::jmax(start, 0.0) - base;
     auto it = std::lower_bound(s.events.begin(), s.events.end(), from, [](const SeqEvent& e, double b) { return e.beat < b; });
-    for (; it != s.events.end() && base + it->beat < end; ++it) {
+    for (; it != s.events.end() && base + it->beat < lookEnd; ++it) {
+      const double beat = base + it->beat;
+      if (it->kind == 1) {
+        if (beat < scheduledBefore) continue;  // already with the engine
+        if (beat >= end) {
+          const int64_t frame = blockStart + numFrames + juce::jmax(0, static_cast<int>((beat - end) / beatsPerFrame));
+          const SeqEvent& e = *it;
+          auto frames = [&](double beats) { return beats > 0.0 ? static_cast<int32_t>(juce::jmin(beats * 60.0 / bpm * sampleRate_, 2.0e9)) : -1; };
+          engine_->scheduleInstrumentNote(frame, e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup, e.tie);
+          noteSequenceInstrument(e);
+          continue;
+        }
+      } else if (beat >= end) {
+        continue;
+      }
       if (dueCount_ >= kMaxDuePerBlock) return;  // a pathological block: the rest are dropped rather than allocating
       const int at = juce::jlimit(0, numFrames - 1, static_cast<int>((base + it->beat - start) / beatsPerFrame));
       due_[dueCount_++] = {at, &*it};
@@ -946,19 +968,26 @@ void EngineHost::applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame
     seqRecentNext_ = (seqRecentNext_ + 1) % 256;
   } else if (e.kind == 1) {
     engine_->instrumentNoteOn(e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup, e.tie);
-    if (e.durationBeats > 0.0 && seqSustainedCount_ < kSeqSustained) {
-      bool known = false;
-      for (int i = 0; i < seqSustainedCount_; i++) known = known || seqSustained_[i] == e.id;
-      if (!known) seqSustained_[seqSustainedCount_++] = e.id;
-    }
+    noteSequenceInstrument(e);
   } else {
     const int32_t ramp = e.rampBeats > 0.0 ? juce::jmax(0, frames(e.rampBeats)) : 0;
     engine_->scheduleParam({frame, e.target, e.bus, e.id, e.param, e.value, e.from, e.hasFrom, ramp});
   }
 }
 
-void EngineHost::releaseSequence() {
+// Remembers an instrument that was given a timed (sustained) sequence note, so a stop or locate can end it.
+void EngineHost::noteSequenceInstrument(const SeqEvent& e) {
+  if (e.durationBeats <= 0.0 || seqSustainedCount_ >= kSeqSustained) return;
+  for (int i = 0; i < seqSustainedCount_; i++)
+    if (seqSustained_[i] == e.id) return;
+  seqSustained_[seqSustainedCount_++] = e.id;
+}
+
+// Ends what the sequence has sounding and withdraws the instrument notes it scheduled ahead (from `fromFrame`, the block
+// being processed: the ones for this block are already in the engine's queue).
+void EngineHost::releaseSequence(int64_t fromFrame) {
   if (!engine_) return;
+  engine_->cancelScheduledInstrumentNotes(fromFrame);
   for (int i = 0; i < 256; i++) {
     if (seqRecentVoices_[i] != 0) engine_->release(seqRecentVoices_[i]);
     seqRecentVoices_[i] = 0;
