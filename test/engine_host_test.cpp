@@ -969,6 +969,36 @@ int main() {
       CHECK(peak > 0.01f, "a sequence instrument note sounds (peak %.3f)", peak);
     }
 
+    {  // a tied instrument note glides into the held one (no re-attack), an untied one re-attacks
+      auto render = [&](const char* tieJson) {
+        Rig r;
+        r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+        r.block();
+        r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":5,"bus":0})"));  // Bass
+        r.block();
+        setSeq(r, (juce::String(R"({"lengthBeats":8,"events":[{"beat":0,"kind":"instrument","instrument":1,"durationBeats":2.5},{"beat":2,"kind":"instrument","instrument":1,"durationBeats":1)") + tieJson + "}]}").toRawUTF8());
+        r.block();
+        r.hostInfo.valid = true;
+        r.hostInfo.playing = true;
+        r.hostInfo.bpm = 120.0;
+        std::vector<float> out;
+        for (int b = 0; b < 200; b++) {
+          r.hostInfo.ppq = b * kBlock / kSr * 2.0;
+          r.block();
+          const float* d = r.buf.getReadPointer(0);
+          out.insert(out.end(), d, d + kBlock);
+        }
+        return out;
+      };
+      const auto untied = render("");
+      const auto tied = render(R"(,"tie":true)");
+      // The second note starts at 1 s (+ the declared latency); the sounds must differ from there on.
+      const size_t from = static_cast<size_t>(kSr) + 4800 + 1500;
+      float diff = 0.0f;
+      for (size_t i = from; i < std::min(untied.size(), tied.size()) && i < from + 6000; i++) diff = std::max(diff, std::fabs(untied[i] - tied[i]));
+      CHECK(diff > 0.02f, "a sequence event's tie reaches the engine (max difference %.3f)", diff);
+    }
+
     {  // no allocation on the audio thread, none of the sequence's voices reach the page, a swapped engine drops it
       Rig r;
       r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32})"));

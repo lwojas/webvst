@@ -179,7 +179,7 @@ class EngineHost : private juce::Timer {
   struct SeqEvent {
     double beat = 0.0;
     uint8_t kind = 0;  // 0 sample, 1 instrument, 2 param
-    bool loop = false, mono = false, hasFrom = false;
+    bool loop = false, mono = false, hasFrom = false, tie = false;
     int32_t id = 0, bus = 0, region = -1, chokeGroup = 0, track = -1, param = 0, target = 0;
     float gain = 1.0f, pan = 0.0f, pitch = 0.0f, value = 0.0f, from = 0.0f;
     double durationBeats = -1.0, rampBeats = 0.0;

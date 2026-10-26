@@ -376,6 +376,7 @@ void EngineHost::handleMessage(const juce::var& msg) {
     c.i[1] = has(p, "duration") ? static_cast<int32_t>(toFrame(num(p, "duration", 0))) : -1;
     c.i[2] = chokeGroupOf(p);
     c.i[3] = has(p, "time");
+    c.i[4] = flag(p, "tie");
     c.f[0] = static_cast<float>(num(p, "velocity", 1.0));
     c.f[1] = static_cast<float>(num(p, "pan", 0.0));
     c.f[2] = static_cast<float>(num(p, "pitch", 0.0));
@@ -509,6 +510,7 @@ void EngineHost::handleMessage(const juce::var& msg) {
           ev.pan = static_cast<float>(num(e, "pan", 0.0));
           ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
           ev.chokeGroup = chokeGroupOf(e);
+          ev.tie = flag(e, "tie");
         } else if (kind == "param") {
           ev.kind = 2;
           const juce::var t = e["target"];
@@ -648,9 +650,9 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
     case CmdType::InstRemove: e.removeInstrument(c.i[0]); break;
     case CmdType::InstNoteOn:
       if (!c.i[3] || static_cast<int64_t>(c.d[0]) <= blockStart)
-        e.instrumentNoteOn(c.i[0], c.f[0], c.f[1], c.f[2], c.i[1], c.i[2]);
+        e.instrumentNoteOn(c.i[0], c.f[0], c.f[1], c.f[2], c.i[1], c.i[2], c.i[4] != 0);
       else
-        e.scheduleInstrumentNote(static_cast<int64_t>(c.d[0]), c.i[0], c.f[0], c.f[1], c.f[2], c.i[1], c.i[2]);
+        e.scheduleInstrumentNote(static_cast<int64_t>(c.d[0]), c.i[0], c.f[0], c.f[1], c.f[2], c.i[1], c.i[2], c.i[4] != 0);
       break;
     case CmdType::InstNoteOff: e.instrumentNoteOff(c.i[0]); break;
     case CmdType::InstParam: e.setInstrumentParam(c.i[0], c.i[1], c.f[0]); break;
@@ -943,7 +945,7 @@ void EngineHost::applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame
     seqRecentVoices_[seqRecentNext_] = voice;
     seqRecentNext_ = (seqRecentNext_ + 1) % 256;
   } else if (e.kind == 1) {
-    engine_->instrumentNoteOn(e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup);
+    engine_->instrumentNoteOn(e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup, e.tie);
     if (e.durationBeats > 0.0 && seqSustainedCount_ < kSeqSustained) {
       bool known = false;
       for (int i = 0; i < seqSustainedCount_; i++) known = known || seqSustained_[i] == e.id;
