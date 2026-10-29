@@ -129,6 +129,11 @@ void EngineHost::prepare(double sampleRate) {
   engine_ = std::make_unique<webdsp::Engine>();
   engine_->init(sampleRate_, kOutputChannels, kDefaultMaxVoices);
   warmUp(*engine_);
+  graphLog_.clear();  // a new engine holds nothing of any page's
+  engineHasSamples_ = false;
+  engineMaxVoices_ = 0;
+  adopting_ = false;
+  lastSequenceJson_.clear();
 }
 
 void EngineHost::setEventSink(std::function<void(const juce::var&)> sink) { sink_ = std::move(sink); }
@@ -147,6 +152,29 @@ void EngineHost::pushCmd(const Cmd& c) {
 // Message thread: page -> native
 // ---------------------------------------------------------------------------------------------
 
+// A page that opts in (`adopt`) and reconnects to an engine its predecessor built keeps that engine, if nothing stops it
+// (see the members in EngineHost.h). The decision is made here; whether the page's graph really matches is found out as its
+// graph commands arrive (absorbWhileAdopting).
+bool EngineHost::adoptable(const juce::var& message) const {
+  return flag(message, "adopt") && !graphLog_.empty() && !engineHasSamples_ &&
+         integer(message, "maxVoices", kDefaultMaxVoices) == engineMaxVoices_;
+}
+
+void EngineHost::swapInFreshEngine(int maxVoices) {
+  auto fresh = std::make_unique<webdsp::Engine>();
+  fresh->init(sampleRate_, kOutputChannels, maxVoices);
+  warmUp(*fresh);
+  Cmd swap;
+  swap.type = CmdType::SwapEngine;
+  swap.p = fresh.release();
+  pushCmd(swap);
+  graphLog_.clear();
+  engineHasSamples_ = false;
+  engineMaxVoices_ = maxVoices;
+  lastSequenceJson_.clear();  // the swap dropped the engine's sequence with the rest
+  skipIdenticalSequence_ = false;
+}
+
 void EngineHost::beginInit(const juce::var& message) {
   const int maxVoices = juce::jlimit(1, 1024, integer(message, "maxVoices", kDefaultMaxVoices));
   for (auto& kv : loading_) {  // a reloaded page abandons any half-received sample
@@ -155,17 +183,51 @@ void EngineHost::beginInit(const juce::var& message) {
   }
   loading_.clear();
 
-  auto fresh = std::make_unique<webdsp::Engine>();
-  fresh->init(sampleRate_, kOutputChannels, maxVoices);
-  warmUp(*fresh);
-  Cmd swap;
-  swap.type = CmdType::SwapEngine;
-  swap.p = fresh.release();
-  pushCmd(swap);
+  adopting_ = adoptable(message);
+  adoptPos_ = 0;
+  sinceInit_.clear();
+  skipIdenticalSequence_ = adopting_;
+  if (adopting_) {
+    Trace::log("native: engine kept for the reconnecting page");
+  } else {
+    swapInFreshEngine(maxVoices);
+  }
   resendTransport_.store(true, std::memory_order_relaxed);
   lastSentTransport_ = {};
   send(buildReady(maxVoices));
   Trace::log("native: engine ready sent to the page");
+}
+
+// While a reconnected page rebuilds its graph on the engine it kept: true if the message is one the engine has already done
+// (swallow it). A graph command that differs from the engine's moves the page to a fresh engine and replays what it has sent.
+bool EngineHost::absorbWhileAdopting(const juce::var& message, const juce::String& type) {
+  static const char* const kGraph[] = {"add-effect", "remove-effect", "move-effect", "create-instrument", "remove-instrument"};
+  sinceInit_.push_back(message);
+  bool structural = false;
+  for (const char* g : kGraph) structural = structural || type == g;
+  constexpr size_t kMaxReplay = 4096;  // a page that never finishes matching is not the page the engine was kept for
+  if (structural && adoptPos_ < graphLog_.size() && juce::JSON::toString(message, true) == graphLog_[adoptPos_]) {
+    if (++adoptPos_ == graphLog_.size()) {  // the whole graph is accounted for
+      adopting_ = false;
+      sinceInit_.clear();
+    }
+    return true;
+  }
+  if (!structural && sinceInit_.size() <= kMaxReplay) return false;  // parameters, notes and the like apply to the kept engine as they are
+  if (structural && adoptPos_ >= graphLog_.size()) {  // cannot happen while adopting (see above); apply normally
+    adopting_ = false;
+    sinceInit_.clear();
+    return false;
+  }
+  // The page's graph is not the engine's: start over on a fresh engine with everything the page has sent since __init.
+  Trace::log("native: page graph differs from the kept engine, rebuilding");
+  std::vector<juce::var> replay;
+  replay.swap(sinceInit_);
+  adopting_ = false;
+  skipIdenticalSequence_ = false;
+  swapInFreshEngine(engineMaxVoices_);
+  for (const auto& m : replay) handleMessage(m);
+  return true;
 }
 
 juce::var EngineHost::buildReady(int maxVoices) {
@@ -210,6 +272,12 @@ juce::var EngineHost::buildReady(int maxVoices) {
 
 void EngineHost::handleMessage(const juce::var& msg) {
   const juce::String type = msg["type"].toString();
+  if (adopting_ && type != "__init" && absorbWhileAdopting(msg, type)) return;
+  // What the engine holds of the page's graph (for a later reconnect): its structure commands in order, and whether samples came.
+  if (type == "add-effect" || type == "remove-effect" || type == "move-effect" || type == "create-instrument" || type == "remove-instrument")
+    graphLog_.push_back(juce::JSON::toString(msg, true));
+  else if (type == "sample-begin" || type == "start-capture" || type == "arm-capture")
+    engineHasSamples_ = true;
   Cmd c;
 
   // Fills a Trigger/ScheduleEvent command from sample-trigger params (TriggerParams / ScheduledEvent).
@@ -482,6 +550,12 @@ void EngineHost::handleMessage(const juce::var& msg) {
   } else if (type == "set-sequence") {
     c.type = CmdType::SetSequence;
     const juce::var s = msg["sequence"];
+    // A page that reconnected to the kept engine sends the song it already had playing: resending it would only restart it.
+    const juce::String json = juce::JSON::toString(s, true);
+    const bool same = skipIdenticalSequence_ && json == lastSequenceJson_;
+    skipIdenticalSequence_ = false;
+    lastSequenceJson_ = json;
+    if (same) return;
     if (s.isObject() && s["events"].isArray() && num(s, "lengthBeats", 0.0) > 0.0) {
       auto seq = std::make_unique<Sequence>();
       seq->lengthBeats = num(s, "lengthBeats", 0.0);

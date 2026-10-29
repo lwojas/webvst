@@ -122,7 +122,9 @@
     this.numberOfOutputs = 1;
     activeNode = this;
     var po = (options && options.processorOptions) || {};
-    post({ type: '__init', maxVoices: po.maxVoices, outputChannels: po.outputChannels });
+    // `adoptEngine` (set by a page on window.__webdspHost before AudioRuntime.create) asks the plugin to keep the engine and graph a
+    // previous window built, instead of swapping in an empty one: the page promises to rebuild the same graph (see EngineHost.h).
+    post({ type: '__init', maxVoices: po.maxVoices, outputChannels: po.outputChannels, adopt: !!window.__webdspHost.adoptEngine });
   }
   FakeNode.prototype.connect = function (destination) {
     return destination;

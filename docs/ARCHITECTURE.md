@@ -141,6 +141,20 @@ node --test test/                                  # the shim against the real w
   The client then uses the seams it wants (`getHostState`, `getHostFiles`, `onHostTransport`). Both existing plugins are built
   this way, from the same sources.
 
+## Keeping the engine across a reopen
+
+A page connects with `__init`, and normally the plugin answers by swapping in a fresh, empty engine: the graph, the voices and the
+playing native sequence are gone until the page has rebuilt and resent them. For a page with a big graph that is an audible gap.
+
+A page can opt in by setting `window.__webdspHost.adoptEngine = true` before `AudioRuntime.create` (the shim adds `adopt` to `__init`). The
+plugin then keeps the engine, answers `ready` at once, and treats the page's graph-structure commands (`add-effect`, `remove-effect`,
+`move-effect`, `create-instrument`, `remove-instrument`) as already done when they match, in order, the ones it applied to this engine
+(`graphLog_`); it swallows them. Everything else (parameters, notes, transport) applies as usual. A `set-sequence` identical to the one the
+engine holds is ignored, so the song is not restarted. When the page has matched the whole log it is adopted; a command that does not
+match, or a graph holding samples or captures, moves the page to a fresh engine and **replays** everything the page has sent since
+`__init` there, so adopting can save work but not change the result. The one requirement on a page: build the same graph, in the same order,
+every time (ids are the page's own counters). Tested in `engine_host_test.cpp` ("Reopening the editor").
+
 ## Known limits and not done yet
 
 - With no native sequence (an older plugin, or a browser) the page's JS sequencer is the timing authority: closing the editor

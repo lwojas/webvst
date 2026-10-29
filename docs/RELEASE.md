@@ -59,8 +59,7 @@ the repo's licence is still TBA.
 
 These are limits a user of a release would meet (see `ARCHITECTURE.md`, "Known limits"):
 
-- Reopening the editor starts a fresh engine, so a native-sequence song is silent until the page resends it (staged engine
-  swap would fix this).
+- Reopening the editor starts a fresh engine unless the page opts in to keeping it (`window.__webdspHost.adoptEngine = true`, see ARCHITECTURE "Keeping the engine across a reopen"); a page that does not opt in is silent until it has sent its song again.
 - Pitch bend, CCs and sustain are not routed natively; no MIDI output; SysEx not forwarded; no hardware controllers in the
   macOS WebView.
 - WebTracker's native sequence skips MIDI-output instruments, `bus.gain` cell automation and the poly voice limit.

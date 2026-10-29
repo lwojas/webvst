@@ -1148,6 +1148,95 @@ int main() {
     }
   }
 
+  {  // Reopening the editor: a page that opts in keeps the engine, its graph and its playing sequence
+    const char* graph[] = {R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})",
+                           R"({"type":"add-effect","bus":0,"effect":5,"kind":10,"index":-1})",
+                           R"({"type":"set-effect-param","bus":0,"effect":5,"param":0,"value":0})"};
+    const char* seq = R"({"type":"set-sequence","sequence":{"lengthBeats":1,"events":[{"beat":0,"kind":"instrument","instrument":1,"gain":1}]}})";
+    auto playBlocks = [](Rig& r, int blocks, double ppq) {
+      float peak = 0.0f;
+      r.hostInfo.valid = true;
+      r.hostInfo.playing = true;
+      r.hostInfo.bpm = 120.0;
+      for (int b = 0; b < blocks; b++) {
+        r.hostInfo.ppq = ppq + b * kBlock / kSr * 2.0;
+        peak = std::max(peak, r.block());
+      }
+      return peak;
+    };
+    auto firstPage = [&](Rig& r) {
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"adopt":true})"));
+      r.block();
+      for (const char* m : graph) r.host.handleMessage(parse(m));
+      r.host.handleMessage(parse(seq));
+      r.block();
+    };
+    auto errors = [](Rig& r) { r.pump(); return r.count("error"); };
+
+    {  // the same graph is rebuilt: nothing of it reaches the engine twice, and the song never stops
+      Rig r;
+      firstPage(r);
+      CHECK(playBlocks(r, 100, 0.0) > 0.01f, "the sequence plays before the window closes");
+      r.events.clear();
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"adopt":true})"));  // the editor opens again
+      CHECK(r.first("ready") != nullptr, "an adopting page is answered with ready");
+      // no block is rendered between the init and the song: the engine was not swapped for an empty one
+      CHECK(playBlocks(r, 100, 0.0) > 0.01f, "the sequence keeps playing after an adopting page connects, before it sends anything");
+      for (const char* m : graph) r.host.handleMessage(parse(m));
+      r.host.handleMessage(parse(seq));  // the same song again
+      r.block();
+      CHECK(errors(r) == 0, "the rebuilt graph commands were not applied a second time (errors: %d)", errors(r));
+      CHECK(playBlocks(r, 100, 0.0) > 0.01f, "the sequence still plays after the page has rebuilt its graph");
+      // the page now adds to the graph for real
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":2,"kind":0,"bus":0})"));
+      r.host.handleMessage(parse(R"({"type":"instrument-note-on","instrument":2,"params":{"velocity":1}})"));
+      r.hostInfo.playing = false;
+      r.block();
+      CHECK(errors(r) == 0 && r.block() > 0.01f, "commands after the matched graph reach the kept engine");
+    }
+
+    {  // a page that does not opt in gets an empty engine, as before
+      Rig r;
+      firstPage(r);
+      playBlocks(r, 20, 0.0);
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32})"));
+      r.block();
+      r.hostInfo.playing = false;
+      CHECK(r.block() == 0.0f && playBlocks(r, 60, 0.0) == 0.0f, "without adopt the old song is gone");
+    }
+
+    {  // a page whose graph differs is moved to a fresh engine, with everything it sent replayed there
+      Rig r;
+      firstPage(r);
+      playBlocks(r, 20, 0.0);
+      r.events.clear();
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"adopt":true})"));
+      r.host.handleMessage(parse(graph[0]));  // matches
+      r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":2,"kind":1,"bus":0})"));  // does not
+      r.host.handleMessage(parse(R"({"type":"instrument-note-on","instrument":2,"params":{"velocity":1}})"));
+      r.hostInfo.playing = false;
+      r.block();
+      const float peak = r.block();
+      CHECK(errors(r) == 0, "a differing graph is rebuilt without errors (%d)", errors(r));
+      CHECK(peak > 0.0f, "the replayed commands reached the fresh engine (peak %.3f)", peak);
+      r.host.handleMessage(parse(R"({"type":"instrument-note-on","instrument":1,"params":{"velocity":1}})"));
+      CHECK(r.block() > 0.01f, "the page's first instrument exists on the fresh engine too");
+    }
+
+    {  // samples in the engine make it un-adoptable (the page would load them again)
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"adopt":true})"));
+      r.block();
+      r.host.handleMessage(parse(graph[0]));
+      r.host.handleMessage(parse(R"({"type":"sample-begin","sampleId":3,"channels":1,"length":16,"sampleRate":48000})"));
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":32,"adopt":true})"));
+      r.host.handleMessage(parse(graph[0]));
+      r.host.handleMessage(parse(R"({"type":"instrument-note-on","instrument":1,"params":{"velocity":1}})"));
+      r.block();
+      CHECK(errors(r) == 0 && r.block() > 0.01f, "a graph holding samples is rebuilt on a fresh engine");
+    }
+  }
+
   std::printf(failures == 0 ? "\nALL PASSED\n" : "\n%d FAILED\n", failures);
   return failures == 0 ? 0 : 1;
 }

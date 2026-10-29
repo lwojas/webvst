@@ -135,6 +135,9 @@ class EngineHost : private juce::Timer {
   void send(const juce::var& event);
   void pushCmd(const Cmd& c);
   void beginInit(const juce::var& message);
+  void swapInFreshEngine(int maxVoices);
+  bool adoptable(const juce::var& message) const;
+  bool absorbWhileAdopting(const juce::var& message, const juce::String& type);
   juce::var buildReady(int maxVoices);
   void applyCmd(const Cmd& c, int64_t blockStart);
   void forwardMidi(const juce::MidiBuffer& midi, int64_t blockStart);
@@ -154,6 +157,20 @@ class EngineHost : private juce::Timer {
   Fifo<Evt> evts_{4096};
   std::atomic<int> droppedCmds_{0};
   std::atomic<int> reportedDropped_{0};
+
+  // Message thread: keeping the engine across a window reopen ("adopt"). A page that opts in (shim `adoptEngine`) is not given a fresh
+  // engine when it reconnects: the engine, its graph and its sequence stay, so what is playing keeps playing while the window loads.
+  // The page then rebuilds its graph as usual; `graphLog_` (the graph-structure commands applied to this engine, in order) lets the
+  // host recognise those commands as already done and swallow them. A page whose graph differs is moved to a fresh engine, and
+  // everything it has sent since `__init` (`sinceInit_`) is replayed there, so adoption can only ever save work, never change the result.
+  std::vector<juce::String> graphLog_;
+  bool engineHasSamples_ = false;  // samples or captures make a graph un-adoptable: the page would load them again
+  int engineMaxVoices_ = 0;
+  bool adopting_ = false;
+  size_t adoptPos_ = 0;
+  std::vector<juce::var> sinceInit_;
+  juce::String lastSequenceJson_;  // the set-sequence the engine holds, while it is known to be the page's
+  bool skipIdenticalSequence_ = false;
 
   std::function<void(const juce::var&)> sink_;
   std::unordered_map<int32_t, SamplePayload*> loading_;  // message thread: samples being received
