@@ -36,7 +36,9 @@ tests. To build against a working copy, pass `-DWEBVST_WEBDSP_DIR=../webdsp`. We
 Two plugins are built from the same sources, one per web client: **WebSeq** and **WebTracker**. The bundles land under
 `build/WebSeq_artefacts/VST3/` and `build/WebTracker_artefacts/VST3/`; copy them to `~/Library/Audio/Plug-Ins/VST3/` to load
 them in a host. Each has its own plugin ID (so the DAW lists them separately), the app name stamped on its saved state (a
-plugin refuses the other app's state), and its own default URL. (The earlier single "WebVST" bundle is gone; delete
+plugin refuses the other app's state), and its own default URL. Pulse.8 builds a third plugin from these same sources, declared in its own repo (`vst/CMakeLists.txt` there), where the page is the client and the song plays natively.
+
+(The earlier single "WebVST" bundle is gone; delete
 `WebVST.vst3` from the plug-ins folder. Sessions saved with it do not load in the new plugins.)
 
 ## MIDI and transport

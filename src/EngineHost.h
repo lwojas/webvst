@@ -34,7 +34,7 @@ class EngineHost : private juce::Timer {
 
   // The webdsp command/event protocol version this host implements (webdsp/src/runtime/commandProtocol.ts,
   // HOST_PROTOCOL_VERSION). Reported in the ready event so a newer web app can notice an older plugin.
-  static constexpr int kProtocolVersion = 3;  // 2: set-midi-route / ready.midiRouting; 3: set-sequence / ready.nativeSequence
+  static constexpr int kProtocolVersion = 4;  // 2: set-midi-route / ready.midiRouting; 3: set-sequence / ready.nativeSequence; 4: bus targets in scheduled params
 
   // Every message type handleMessage understands: the HostCommand types plus the shim's own sample-transfer
   // messages. Tests check that it covers webdsp's HostCommand union.
@@ -164,7 +164,7 @@ class EngineHost : private juce::Timer {
     bool active = false;
     bool instrument = false;  // else a sample
     int32_t id = 0, unityNote = 60, bus = 0, chokeGroup = 0, channel = -1;
-    bool chop = false, loop = false, mono = false, hold = false;
+    bool chop = false, loop = false, mono = false, hold = false, fixedPitch = false;
     float gain = 1.0f;
   } route_;
   static constexpr int32_t kRouteVoiceBase = 1 << 30;  // voice ids from here up are the router's, never the page's

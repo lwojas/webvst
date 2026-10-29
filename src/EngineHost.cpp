@@ -475,6 +475,7 @@ void EngineHost::handleMessage(const juce::var& msg) {
       c.i[8] = flag(r, "holdUntilKeyUp");
       c.i[9] = juce::jmax(0, integer(r, "chokeGroup", 0));
       c.i[10] = has(r, "channel") ? juce::jlimit(0, 15, integer(r, "channel", 0)) : -1;
+      c.i[11] = flag(r, "fixedPitch");
       c.f[0] = static_cast<float>(juce::jlimit(0.0, 1.0, num(r, "gain", 1.0)));
     }
     pushCmd(c);
@@ -524,6 +525,10 @@ void EngineHost::handleMessage(const juce::var& msg) {
           } else if (t.hasProperty("sample")) {
             ev.target = 2;
             ev.id = integer(t, "sample", 0);
+          } else if (t.hasProperty("bus")) {
+            ev.target = 3;  // a bus's mixer parameters (protocol 4); the engine ignores any other parameter id
+            ev.bus = integer(t, "bus", 0);
+            ev.id = 0;
           } else continue;
           ev.param = integer(e, "param", 0);
           ev.value = static_cast<float>(num(e, "value", 0.0));
@@ -693,6 +698,7 @@ void EngineHost::applyCmd(const Cmd& c, int64_t blockStart) {
       route_.hold = c.i[8] != 0;
       route_.chokeGroup = c.i[9];
       route_.channel = c.i[10];
+      route_.fixedPitch = c.i[11] != 0;
       route_.gain = c.f[0];
       break;
     }
@@ -841,7 +847,7 @@ void EngineHost::applyRoutedMidi(const uint8_t* data, int size) {
 
   if (on) {
     const float level = static_cast<float>(velocity) / 127.0f * route_.gain;
-    const int32_t pitch = note - route_.unityNote;
+    const int32_t pitch = route_.fixedPitch ? 0 : note - route_.unityNote;  // fixedPitch: every key plays at the target's own pitch (a drum pad)
     if (route_.instrument) {
       engine_->instrumentNoteOn(route_.id, level, 0.0f, static_cast<float>(pitch), -1, route_.chokeGroup);
       lastInstrumentNote_ = note;

@@ -759,6 +759,32 @@ int main() {
       CHECK(peak > 0.01f && first >= 199 && first <= 202, "an instrument route plays a note on its own sample (first sound at %d, peak %.3f)", first, peak);
     }
 
+    {  // fixedPitch: every key plays an instrument at its own pitch (a drum pad), where a normal route transposes by the key
+      auto render = [&](int note, const char* routeJson) {
+        Rig r;
+        r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+        r.block();
+        r.host.handleMessage(parse(R"({"type":"create-instrument","instrument":1,"kind":0,"bus":0})"));
+        r.block();
+        route(r, routeJson);
+        r.block();
+        play(r, {{on(1, note), 0}});
+        std::vector<float> out(r.buf.getReadPointer(0), r.buf.getReadPointer(0) + kBlock);
+        for (int b = 0; b < 20; b++) {
+          r.block();
+          out.insert(out.end(), r.buf.getReadPointer(0), r.buf.getReadPointer(0) + kBlock);
+        }
+        return out;
+      };
+      const auto lowFixed = render(36, R"({"kind":"instrument","id":1,"unityNote":60,"fixedPitch":true})");
+      const auto highFixed = render(84, R"({"kind":"instrument","id":1,"unityNote":60,"fixedPitch":true})");
+      const auto lowFree = render(36, R"({"kind":"instrument","id":1,"unityNote":60})");
+      const auto highFree = render(84, R"({"kind":"instrument","id":1,"unityNote":60})");
+      CHECK(lowFixed == highFixed, "a fixedPitch route plays every key identically");
+      CHECK(lowFree != highFree, "a normal route transposes by the key");
+      CHECK(lowFixed == render(60, R"({"kind":"instrument","id":1,"unityNote":60})"), "fixedPitch is the unity pitch");
+    }
+
     {  // a sample route: start frame, velocity and route gain scale the level
       Rig r;
       r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
@@ -967,6 +993,37 @@ int main() {
         peak = std::max(peak, r.block());
       }
       CHECK(peak > 0.01f, "a sequence instrument note sounds (peak %.3f)", peak);
+    }
+
+    {  // a bus (mixer) target in a sequence param event (protocol 4): a fader move between two hits changes the second only
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      // the real parameter id, from the engine's own enum
+      const int busGain = static_cast<int>(webdsp::NodeParam::BusGain);
+      setSeq(r, (juce::String(R"({"lengthBeats":4,"events":[{"beat":0,"kind":"sample","sample":7,"bus":1},{"beat":1,"kind":"param","target":{"bus":1},"param":)") +
+                 juce::String(busGain) + R"(,"value":0.5},{"beat":2,"kind":"sample","sample":7,"bus":1}]})").toRawUTF8());
+      r.block();
+      const int latency = r.host.latencySamples();
+      r.hostInfo.valid = true;
+      r.hostInfo.playing = true;
+      r.hostInfo.bpm = 120.0;
+      std::vector<float> out;
+      for (int b = 0; b < 170; b++) {
+        r.hostInfo.ppq = b * kBlock / kSr * 2.0;
+        r.block();
+        const float* d = r.buf.getReadPointer(0);
+        out.insert(out.end(), d, d + kBlock);
+      }
+      auto peakAt = [&](int64_t from) {
+        float p = 0.0f;
+        for (int64_t i = from; i < from + 400 && i < static_cast<int64_t>(out.size()); i++) p = std::max(p, std::fabs(out[static_cast<size_t>(i)]));
+        return p;
+      };
+      const float first = peakAt(latency), second = peakAt(2 * 24000 + latency);
+      CHECK(first > 0.2f, "the hit before the bus event sounds (%.3f)", first);
+      CHECK(std::fabs(second - first * 0.5f) < 0.03f, "a bus target in a sequence param event moves the fader on the DAW timeline (%.3f then %.3f)", first, second);
     }
 
     {  // a tied instrument note glides into the held one (no re-attack), an untied one re-attacks

@@ -55,6 +55,8 @@ how those repos build.
 
 ## Native sequence
 
+Protocol 4 adds `{ bus }` targets to `schedule-params` and to a sequence's param events (a bus's gain, pan, send amount and main gain, on the audio clock), so a sequencer can bake per-pattern mixer moves into the song. Pulse.8 is the first client to do so.
+
 An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence()`, see webdsp `docs/native-sequence.md`). `EngineHost` then plays it itself, on the audio thread, against the DAW's transport: each block it finds the events in that block's slice of the timeline (`ppq mod lengthBeats`, shifted by the declared latency so it lines up after plugin delay compensation), and plays them between render segments split at their frames, merged in time order with routed MIDI. So it is sample-accurate, follows locates, loops and tempo, keeps playing with the editor closed and renders in an offline bounce.
 
 - The sequence arrives as one `set-sequence` message, is built into plain structs on the message thread and swapped in by pointer (the old one is freed on the message thread through a dispose event), so the audio thread allocates nothing.
@@ -73,7 +75,7 @@ An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence
 | plugin → page | `analysis` (spectrum taps: per slot (4), the latest 2048 mono samples at the input or output of a tapped effect, ~23/s, only while that slot is set via `set-analysis-tap`; copied on the audio thread under a seqlock, sent from the message thread) | webdsp `docs/spectrum.md` |
 | plugin → page | `host-transport` (mapping of the DAW's beat to engine time, tempo, loop, epoch) | webdsp `docs/host-transport.md` |
 | plugin → page | `midi` (channel messages with engine times) | surfaced as a Web MIDI input (for note entry, CCs, learn) |
-| page → plugin | `set-midi-route` (what a key plays) | webdsp `docs/midi-routing.md`; the plugin plays notes itself, see below |
+| page → plugin | `set-midi-route` (what a key plays; `fixedPitch` for a drum pad, protocol 4) | webdsp `docs/midi-routing.md`; the plugin plays notes itself, see below |
 | both | `state-*` | `SessionState.h`; webdsp `docs/host-state.md` |
 | both | `files-*` | `HostFiles.h`; webdsp `docs/host-files.md` |
 
