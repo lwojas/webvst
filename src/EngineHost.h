@@ -35,6 +35,7 @@ class EngineHost : private juce::Timer {
   // The webdsp command/event protocol version this host implements (webdsp/src/runtime/commandProtocol.ts,
   // HOST_PROTOCOL_VERSION). Reported in the ready event so a newer web app can notice an older plugin.
   static constexpr int kProtocolVersion = 4;  // 2: set-midi-route / ready.midiRouting; 3: set-sequence / ready.nativeSequence; 4: bus targets in scheduled params
+  // (a sequence's loops are announced by ready.sequenceLoops instead of a version bump: an older app simply does not send them)
 
   // Every message type handleMessage understands: the HostCommand types plus the shim's own sample-transfer
   // messages. Tests check that it covers webdsp's HostCommand union.
@@ -201,9 +202,14 @@ class EngineHost : private juce::Timer {
     float gain = 1.0f, pan = 0.0f, pitch = 0.0f, value = 0.0f, from = 0.0f;
     double durationBeats = -1.0, rampBeats = 0.0;
   };
-  struct Sequence {
+  // A cycle of events, sorted by beat, repeating every lengthBeats. A sequence is the main cycle plus any number of loops that repeat
+  // beside it on their own lengths (polymeter): each is played against the DAW position as p mod its own length.
+  struct SeqLoop {
     double lengthBeats = 0.0;
-    std::vector<SeqEvent> events;  // sorted by beat
+    std::vector<SeqEvent> events;
+  };
+  struct Sequence {
+    std::vector<SeqLoop> loops;  // the main cycle first (possibly empty), then the page's loops
   };
   struct DueEvent { int at; const SeqEvent* event; };
   static constexpr int32_t kSeqVoiceBase = 1 << 29;  // sequence voice ids: [1<<29, 1<<30); like the router's, never the page's
@@ -225,6 +231,7 @@ class EngineHost : private juce::Timer {
   DueEvent due_[kMaxDuePerBlock];
   int dueCount_ = 0;
   double dueBpm_ = 120.0;
+  static SeqLoop parseSeqLoop(double lengthBeats, const juce::var& events);
   void runSequence(const HostTimeInfo& host, int numFrames, int64_t blockStart);
   void applySequenceEvent(const SeqEvent& e, double bpm, int64_t frame);
   void noteSequenceInstrument(const SeqEvent& e);

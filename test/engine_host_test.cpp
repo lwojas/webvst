@@ -961,6 +961,40 @@ int main() {
               "events are sample-accurate on the DAW timeline (%lld, %lld; wanted %lld, %lld)", (long long)hits[0], (long long)hits[1], (long long)first, (long long)second);
     }
 
+    {  // loops: cycles of their own length beside the main one (polymeter): each repeats on the DAW timeline, drifting against the others
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      const juce::var* ready = r.first("ready");
+      CHECK(ready != nullptr && static_cast<bool>((*ready)["sequenceLoops"]), "ready announces sequenceLoops");
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      // main: 2 beats with no events; one loop of 1.5 beats with a hit at 0; another of 1 beat with a hit at 0.5
+      setSeq(r, R"({"lengthBeats":2,"events":[],"loops":[{"lengthBeats":1.5,"events":[{"beat":0,"kind":"sample","sample":7}]},{"lengthBeats":1,"events":[{"beat":0.5,"kind":"sample","sample":7}]}]})");
+      r.block();
+      const int latency = r.host.latencySamples();
+      const auto hits = onsets(r, 330, 0.0);  // ~3.5 s = 7 beats
+      // 1.5-beat loop: beats 0, 1.5, 3, 4.5, 6; 1-beat loop: 0.5, 1.5, 2.5, ... (1.5 coincides with the first loop's: one onset)
+      std::vector<double> want{0, 0.5, 1.5, 2.5, 3, 3.5, 4.5, 5.5, 6, 6.5};
+      CHECK(hits.size() == want.size(), "each loop repeats on its own length (%zu hits, wanted %zu)", hits.size(), want.size());
+      if (hits.size() == want.size()) {
+        bool ok = true;
+        for (size_t i = 0; i < want.size(); i++) ok = ok && std::llabs(hits[i] - (static_cast<int64_t>(want[i] * 24000) + latency)) <= 2;
+        CHECK(ok, "loop events are sample-accurate and drift against each other as p mod their own length says");
+      }
+    }
+
+    {  // a locate lands every loop where p mod its length says
+      Rig r;
+      r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));
+      r.block();
+      loadSample(r, 7, std::vector<float>(400, 0.5f));
+      setSeq(r, R"({"lengthBeats":4,"events":[],"loops":[{"lengthBeats":3,"events":[{"beat":2,"kind":"sample","sample":7}]}]})");
+      r.block();
+      const auto hits = onsets(r, 330, 7.5);  // 7.5 mod 3 = 1.5: the hit at phase 2 (beat 8) is half a beat in, then every 3 beats
+      CHECK(hits.size() == 3 && std::llabs(hits[0] - (12000 + r.host.latencySamples())) <= 2 && std::llabs(hits[1] - (12000 + 3 * 24000 + r.host.latencySamples())) <= 2,
+            "a locate into a loop plays it from where p mod its length says (%zu hits, first %lld)", hits.size(), hits.empty() ? -1LL : (long long)hits[0]);
+    }
+
     {  // a locate mid-song plays the cycle from there; stop is silent; a stopped transport plays nothing
       Rig r;
       r.host.handleMessage(parse(R"({"type":"__init","maxVoices":16})"));

@@ -255,6 +255,7 @@ juce::var EngineHost::buildReady(int maxVoices) {
                  {"protocolVersion", kProtocolVersion},
                  {"midiRouting", true},
                  {"nativeSequence", true},
+                 {"sequenceLoops", true},
                  {"sampleRate", sampleRate_},
                  {"outputChannels", kOutputChannels},
                  {"maxVoices", maxVoices},
@@ -268,6 +269,67 @@ juce::var EngineHost::buildReady(int maxVoices) {
                                         {"minRateHz", static_cast<double>(webdsp::kLfoMinRateHz)},
                                         {"maxRateHz", static_cast<double>(webdsp::kLfoMaxRateHz)}})},
                  {"clockFrame", static_cast<double>(framesRendered())}});
+}
+
+// One cycle of a sequence from the page's JSON: the events inside [0, lengthBeats) that name a kind this host knows, sorted by beat.
+EngineHost::SeqLoop EngineHost::parseSeqLoop(double lengthBeats, const juce::var& events) {
+  SeqLoop loop;
+  loop.lengthBeats = lengthBeats;
+  loop.events.reserve(static_cast<size_t>(events.size()));
+  for (const auto& e : *events.getArray()) {
+    SeqEvent ev;
+    ev.beat = num(e, "beat", 0.0);
+    if (!(ev.beat >= 0.0 && ev.beat < loop.lengthBeats)) continue;
+    const juce::String kind = e["kind"].toString();
+    ev.durationBeats = has(e, "durationBeats") ? num(e, "durationBeats", -1.0) : -1.0;
+    if (kind == "sample") {
+      ev.kind = 0;
+      ev.id = integer(e, "sample", 0);
+      ev.bus = integer(e, "bus", 0);
+      ev.gain = static_cast<float>(num(e, "gain", 1.0));
+      ev.pan = static_cast<float>(num(e, "pan", 0.0));
+      ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
+      ev.region = has(e, "region") ? integer(e, "region", 0) : -1;
+      ev.loop = flag(e, "loop");
+      ev.chokeGroup = chokeGroupOf(e);
+      ev.mono = flag(e, "mono");
+      ev.track = has(e, "track") ? integer(e, "track", -1) : -1;
+    } else if (kind == "instrument") {
+      ev.kind = 1;
+      ev.id = integer(e, "instrument", 0);
+      ev.gain = static_cast<float>(num(e, "velocity", 1.0));
+      ev.pan = static_cast<float>(num(e, "pan", 0.0));
+      ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
+      ev.chokeGroup = chokeGroupOf(e);
+      ev.tie = flag(e, "tie");
+    } else if (kind == "param") {
+      ev.kind = 2;
+      const juce::var t = e["target"];
+      if (t.hasProperty("effect")) {
+        ev.target = 0;
+        ev.bus = integer(t["effect"], "bus", 0);
+        ev.id = integer(t["effect"], "effect", 0);
+      } else if (t.hasProperty("instrument")) {
+        ev.target = 1;
+        ev.id = integer(t, "instrument", 0);
+      } else if (t.hasProperty("sample")) {
+        ev.target = 2;
+        ev.id = integer(t, "sample", 0);
+      } else if (t.hasProperty("bus")) {
+        ev.target = 3;  // a bus's mixer parameters (protocol 4); the engine ignores any other parameter id
+        ev.bus = integer(t, "bus", 0);
+        ev.id = 0;
+      } else continue;
+      ev.param = integer(e, "param", 0);
+      ev.value = static_cast<float>(num(e, "value", 0.0));
+      ev.hasFrom = has(e, "from");
+      ev.from = static_cast<float>(num(e, "from", 0.0));
+      ev.rampBeats = num(e, "rampBeats", 0.0);
+    } else continue;
+    loop.events.push_back(ev);
+  }
+  std::stable_sort(loop.events.begin(), loop.events.end(), [](const SeqEvent& a, const SeqEvent& b) { return a.beat < b.beat; });
+  return loop;
 }
 
 void EngineHost::handleMessage(const juce::var& msg) {
@@ -558,62 +620,13 @@ void EngineHost::handleMessage(const juce::var& msg) {
     if (same) return;
     if (s.isObject() && s["events"].isArray() && num(s, "lengthBeats", 0.0) > 0.0) {
       auto seq = std::make_unique<Sequence>();
-      seq->lengthBeats = num(s, "lengthBeats", 0.0);
-      seq->events.reserve(static_cast<size_t>(s["events"].size()));
-      for (const auto& e : *s["events"].getArray()) {
-        SeqEvent ev;
-        ev.beat = num(e, "beat", 0.0);
-        if (!(ev.beat >= 0.0 && ev.beat < seq->lengthBeats)) continue;
-        const juce::String kind = e["kind"].toString();
-        ev.durationBeats = has(e, "durationBeats") ? num(e, "durationBeats", -1.0) : -1.0;
-        if (kind == "sample") {
-          ev.kind = 0;
-          ev.id = integer(e, "sample", 0);
-          ev.bus = integer(e, "bus", 0);
-          ev.gain = static_cast<float>(num(e, "gain", 1.0));
-          ev.pan = static_cast<float>(num(e, "pan", 0.0));
-          ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
-          ev.region = has(e, "region") ? integer(e, "region", 0) : -1;
-          ev.loop = flag(e, "loop");
-          ev.chokeGroup = chokeGroupOf(e);
-          ev.mono = flag(e, "mono");
-          ev.track = has(e, "track") ? integer(e, "track", -1) : -1;
-        } else if (kind == "instrument") {
-          ev.kind = 1;
-          ev.id = integer(e, "instrument", 0);
-          ev.gain = static_cast<float>(num(e, "velocity", 1.0));
-          ev.pan = static_cast<float>(num(e, "pan", 0.0));
-          ev.pitch = static_cast<float>(num(e, "pitch", 0.0));
-          ev.chokeGroup = chokeGroupOf(e);
-          ev.tie = flag(e, "tie");
-        } else if (kind == "param") {
-          ev.kind = 2;
-          const juce::var t = e["target"];
-          if (t.hasProperty("effect")) {
-            ev.target = 0;
-            ev.bus = integer(t["effect"], "bus", 0);
-            ev.id = integer(t["effect"], "effect", 0);
-          } else if (t.hasProperty("instrument")) {
-            ev.target = 1;
-            ev.id = integer(t, "instrument", 0);
-          } else if (t.hasProperty("sample")) {
-            ev.target = 2;
-            ev.id = integer(t, "sample", 0);
-          } else if (t.hasProperty("bus")) {
-            ev.target = 3;  // a bus's mixer parameters (protocol 4); the engine ignores any other parameter id
-            ev.bus = integer(t, "bus", 0);
-            ev.id = 0;
-          } else continue;
-          ev.param = integer(e, "param", 0);
-          ev.value = static_cast<float>(num(e, "value", 0.0));
-          ev.hasFrom = has(e, "from");
-          ev.from = static_cast<float>(num(e, "from", 0.0));
-          ev.rampBeats = num(e, "rampBeats", 0.0);
-        } else continue;
-        seq->events.push_back(ev);
-      }
-      std::stable_sort(seq->events.begin(), seq->events.end(), [](const SeqEvent& a, const SeqEvent& b) { return a.beat < b.beat; });
-      if (!seq->events.empty()) c.p = seq.release();
+      seq->loops.push_back(parseSeqLoop(num(s, "lengthBeats", 0.0), s["events"]));
+      if (s["loops"].isArray())
+        for (const auto& l : *s["loops"].getArray())
+          if (l["events"].isArray() && num(l, "lengthBeats", 0.0) > 0.0) seq->loops.push_back(parseSeqLoop(num(l, "lengthBeats", 0.0), l["events"]));
+      bool any = false;
+      for (const auto& l : seq->loops) any = any || !l.events.empty();
+      if (any) c.p = seq.release();
     }
     pushCmd(c);  // a null pointer clears the sequence
   } else if (type == "configure") {
@@ -1000,35 +1013,49 @@ void EngineHost::runSequence(const HostTimeInfo& host, int numFrames, int64_t bl
   dueBpm_ = bpm;
 
   const Sequence& s = *sequence_;
-  const double length = s.lengthBeats;
   // Instrument notes of the coming block are scheduled now, a block ahead; everything else (and any note that was not
   // scheduled ahead, e.g. after a locate or when the block size grew) plays in its own block.
   const double scheduledBefore = seqScheduledBeat_;
   const double lookEnd = end + numFrames * beatsPerFrame;
   seqScheduledBeat_ = lookEnd;
-  for (int64_t cycle = static_cast<int64_t>(std::floor(juce::jmax(start, 0.0) / length)); cycle * length < lookEnd; cycle++) {
-    const double base = static_cast<double>(cycle) * length;
-    const double from = juce::jmax(start, 0.0) - base;
-    auto it = std::lower_bound(s.events.begin(), s.events.end(), from, [](const SeqEvent& e, double b) { return e.beat < b; });
-    for (; it != s.events.end() && base + it->beat < lookEnd; ++it) {
-      const double beat = base + it->beat;
-      if (it->kind == 1) {
-        if (beat < scheduledBefore) continue;  // already with the engine
-        if (beat >= end) {
-          const int64_t frame = blockStart + numFrames + juce::jmax(0, static_cast<int>((beat - end) / beatsPerFrame));
-          const SeqEvent& e = *it;
-          auto frames = [&](double beats) { return beats > 0.0 ? static_cast<int32_t>(juce::jmin(beats * 60.0 / bpm * sampleRate_, 2.0e9)) : -1; };
-          engine_->scheduleInstrumentNote(frame, e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup, e.tie);
-          noteSequenceInstrument(e);
+  bool full = false;
+  // Each loop is its own cycle on the DAW timeline (the main cycle is the first), so loops of different lengths drift against each other.
+  for (const SeqLoop& loop : s.loops) {
+    const double length = loop.lengthBeats;
+    for (int64_t cycle = static_cast<int64_t>(std::floor(juce::jmax(start, 0.0) / length)); cycle * length < lookEnd && !full; cycle++) {
+      const double base = static_cast<double>(cycle) * length;
+      const double from = juce::jmax(start, 0.0) - base;
+      auto it = std::lower_bound(loop.events.begin(), loop.events.end(), from, [](const SeqEvent& e, double b) { return e.beat < b; });
+      for (; it != loop.events.end() && base + it->beat < lookEnd; ++it) {
+        const double beat = base + it->beat;
+        if (it->kind == 1) {
+          if (beat < scheduledBefore) continue;  // already with the engine
+          if (beat >= end) {
+            const int64_t frame = blockStart + numFrames + juce::jmax(0, static_cast<int>((beat - end) / beatsPerFrame));
+            const SeqEvent& e = *it;
+            auto frames = [&](double beats) { return beats > 0.0 ? static_cast<int32_t>(juce::jmin(beats * 60.0 / bpm * sampleRate_, 2.0e9)) : -1; };
+            engine_->scheduleInstrumentNote(frame, e.id, e.gain, e.pan, e.pitch, frames(e.durationBeats), e.chokeGroup, e.tie);
+            noteSequenceInstrument(e);
+            continue;
+          }
+        } else if (beat >= end) {
           continue;
         }
-      } else if (beat >= end) {
-        continue;
+        if (dueCount_ >= kMaxDuePerBlock) {  // a pathological block: the rest are dropped rather than allocating
+          full = true;
+          break;
+        }
+        const int at = juce::jlimit(0, numFrames - 1, static_cast<int>((base + it->beat - start) / beatsPerFrame));
+        due_[dueCount_++] = {at, &*it};
       }
-      if (dueCount_ >= kMaxDuePerBlock) return;  // a pathological block: the rest are dropped rather than allocating
-      const int at = juce::jlimit(0, numFrames - 1, static_cast<int>((base + it->beat - start) / beatsPerFrame));
-      due_[dueCount_++] = {at, &*it};
     }
+  }
+  // The loops were walked one after another: put the due events in time order (stable, so equal frames keep their loop order). In place.
+  for (int i = 1; i < dueCount_; i++) {
+    const DueEvent d = due_[i];
+    int j = i - 1;
+    for (; j >= 0 && due_[j].at > d.at; j--) due_[j + 1] = due_[j];
+    due_[j + 1] = d;
   }
 }
 
