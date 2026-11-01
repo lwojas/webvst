@@ -55,7 +55,7 @@ how those repos build.
 
 ## Native sequence
 
-Protocol 4 adds `{ bus }` targets to `schedule-params` and to a sequence's param events (a bus's gain, pan, send amount and main gain, on the audio clock), so a sequencer can bake per-pattern mixer moves into the song. Pulse.8 is the first client to do so.
+Protocol 4 adds `{ bus }` targets to `schedule-params` and to a sequence's param events (a bus's gain, pan, send amount and main gain, on the audio clock), so a sequencer can bake per-pattern mixer moves into the song. Hybrid.8 (the `Omni8` repo, formerly Pulse.8) is the first client to do so.
 
 An app can hand the plugin the song as a webdsp `Sequence` (`runtime.setSequence()`, see webdsp `docs/native-sequence.md`). `EngineHost` then plays it itself, on the audio thread, against the DAW's transport: each block it finds the events in that block's slice of the timeline (`ppq mod lengthBeats`, shifted by the declared latency so it lines up after plugin delay compensation), and plays them between render segments split at their frames, merged in time order with routed MIDI. A sequence may also carry `loops` (announced as `ready.sequenceLoops`): further cycles of their own length that repeat independently on the same timeline (`ppq mod loop.lengthBeats`), so an app can play tracks of different lengths against each other (polymeter) without building a cycle as long as their least common multiple. So it is sample-accurate, follows locates, loops and tempo, keeps playing with the editor closed and renders in an offline bounce.
 

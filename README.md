@@ -6,7 +6,10 @@ loads the client from a URL. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) fo
 build pipeline.
 
 Status: audio, DAW transport and DAW MIDI are tested in REAPER and Ableton Live on macOS. The project saved in the DAW session and
-the open/save dialogs are verified headless and in Chromium against the real clients, not yet in a DAW. Not done: closing the editor stops playback (the page sequences), native MIDI routing, release packaging.
+the open/save dialogs are verified headless and in Chromium against the real clients, not yet in a DAW. The plugin routes MIDI notes natively
+(protocol 2) and plays the song a client hands it as a `Sequence` on the audio thread (protocol 3, with sequence loops and bus targets from
+protocol 4), so playback survives closing the editor for a client that sends one (webseq, webtracker and Hybrid.8 do); a page that does not
+still sequences from JS, and stops with the editor. Not done: release packaging.
 
 ## How it fits together
 
@@ -36,7 +39,7 @@ tests. To build against a working copy, pass `-DWEBVST_WEBDSP_DIR=../webdsp`. We
 Two plugins are built from the same sources, one per web client: **WebSeq** and **WebTracker**. The bundles land under
 `build/WebSeq_artefacts/VST3/` and `build/WebTracker_artefacts/VST3/`; copy them to `~/Library/Audio/Plug-Ins/VST3/` to load
 them in a host. Each has its own plugin ID (so the DAW lists them separately), the app name stamped on its saved state (a
-plugin refuses the other app's state), and its own default URL. Pulse.8 builds a third plugin from these same sources, declared in its own repo (`vst/CMakeLists.txt` there), where the page is the client and the song plays natively.
+plugin refuses the other app's state), and its own default URL. Hybrid.8 (the `Omni8` repo, formerly Pulse.8) builds a third plugin from these same sources, declared in its own repo (`vst/CMakeLists.txt` there), where the page is the client and the song plays natively.
 
 (The earlier single "WebVST" bundle is gone; delete
 `WebVST.vst3` from the plug-ins folder. Sessions saved with it do not load in the new plugins.)
